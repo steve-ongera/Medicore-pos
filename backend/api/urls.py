@@ -9,7 +9,9 @@ router = DefaultRouter()
 router.register("users", views.UserViewSet, basename="user")
 router.register("suppliers", views.SupplierViewSet, basename="supplier")
 router.register("medicines", views.MedicineViewSet, basename="medicine")
+router.register("products", views.MedicineViewSet, basename="product")  # generic alias
 router.register("medicine-batches", views.MedicineBatchViewSet, basename="medicine-batch")
+router.register("product-batches", views.MedicineBatchViewSet, basename="product-batch")  # generic alias
 router.register("stock-transactions", views.StockTransactionViewSet, basename="stock-transaction")
 router.register("otc-sales", views.OTCSaleViewSet, basename="otc-sale")
 
@@ -22,6 +24,7 @@ urlpatterns = [
     path("auth/refresh/", PlatformSafeTokenRefreshView.as_view(), name="token-refresh"),
     path("auth/register/", views.register_shop, name="register-shop"),
     path("auth/me/", views.me_view, name="me"),
+    path("business-types/", views.business_types, name="business-types"),
     path("shop/", views.shop_view, name="shop"),
     path("subscription/", views.subscription_view, name="subscription"),  # one entry only
     path("billing/wallet/", views.wallet_view, name="billing-wallet"),
