@@ -47,6 +47,8 @@ from api.models import (
     SubscriptionRequest,
     Supplier,
     Conversation, ConversationParticipant, Message, Notification,
+    # Multi-business
+    BusinessType, EXPIRY_TRACKED_TYPES,
     # SaaS
     Bundle, MpesaPayment, PaymentStatus, Shop, WalletTransaction,
 )
@@ -201,8 +203,13 @@ def _stock_annotated(qs):
     )
 
 
+def _fefo(qs):
+    """Earliest expiry first; no-expiry batches last, oldest first (works on every database)."""
+    return qs.order_by(F("expiry_date").asc(nulls_last=True), "created_at")
+
+
 # ---------------------------------------------------------------------------
-# Suppliers / Medicines / Batches / Transactions
+# Suppliers / Products (Medicine model) / Batches / Transactions
 # ---------------------------------------------------------------------------
 class SupplierViewSet(viewsets.ModelViewSet):
     serializer_class = SupplierSerializer
@@ -220,6 +227,8 @@ class SupplierViewSet(viewsets.ModelViewSet):
 
 
 class MedicineViewSet(viewsets.ModelViewSet):
+    """Products. Served at /medicines/ (legacy) and /products/ (generic alias)."""
+
     serializer_class = MedicineSerializer
 
     def get_queryset(self):
@@ -227,9 +236,12 @@ class MedicineViewSet(viewsets.ModelViewSet):
         p = self.request.query_params
         if p.get("category"):
             qs = qs.filter(category__iexact=p["category"])
+        if p.get("barcode"):
+            qs = qs.filter(barcode=p["barcode"])
         if p.get("search"):
             s = p["search"]
-            qs = qs.filter(Q(name__icontains=s) | Q(generic_name__icontains=s))
+            qs = qs.filter(Q(name__icontains=s) | Q(generic_name__icontains=s)
+                           | Q(barcode__icontains=s) | Q(sku__icontains=s))
         return qs
 
     def get_permissions(self):
@@ -257,8 +269,8 @@ class MedicineViewSet(viewsets.ModelViewSet):
     @action(detail=False, methods=["get"])
     def autocomplete(self, request):
         """
-        ?q=para           -> search (max 30)
-        (no q)            -> browse mode: every visible medicine A-Z
+        ?q=para           -> search by name / generic name / barcode / SKU (max 30)
+        (no q)            -> browse mode: every visible product A-Z
         ?include_hidden=1 -> also hidden ones (edit roles only)
         """
         q = (request.query_params.get("q") or "").strip()
@@ -267,7 +279,8 @@ class MedicineViewSet(viewsets.ModelViewSet):
         if not (include_hidden and request.user.role in MEDICINE_EDIT_ROLES):
             qs = qs.filter(is_visible=True)
         if q:
-            qs = qs.filter(Q(name__icontains=q) | Q(generic_name__icontains=q))
+            qs = qs.filter(Q(name__icontains=q) | Q(generic_name__icontains=q)
+                           | Q(barcode__icontains=q) | Q(sku__icontains=q))
         qs = _stock_annotated(qs).order_by("name")
         if q:
             qs = qs[:30]
@@ -283,12 +296,13 @@ class MedicineViewSet(viewsets.ModelViewSet):
         medicine = Medicine.objects.create(
             name=d["name"], generic_name=d["generic_name"], category=d["category"],
             unit=d["unit"], unit_price=d["unit_price"], reorder_level=d["reorder_level"],
+            barcode=d["barcode"], sku=d["sku"],
         )
         batch_no = d["batch_number"] or f"B-{timezone.now():%Y%m%d%H%M%S}"
         batch = MedicineBatch.objects.create(
             medicine=medicine, batch_number=batch_no,
             quantity_received=d["quantity"], quantity_remaining=d["quantity"],
-            expiry_date=d["expiry_date"],
+            expiry_date=d.get("expiry_date"),
         )
         _log(medicine, batch, StockTransactionType.STOCK_IN, d["quantity"], "Quick add", request.user)
         medicine = _stock_annotated(Medicine.objects.filter(pk=medicine.pk)).get()
@@ -296,12 +310,15 @@ class MedicineViewSet(viewsets.ModelViewSet):
 
     @action(detail=True, methods=["get"], url_path="branch-stock")
     def branch_stock(self, request, pk=None):
-        """Per-batch breakdown (kept under the old name so the frontend call is unchanged)."""
+        """Per-batch breakdown (kept under the old name so the frontend call is unchanged).
+        `quantity` is what the edit modal reads; `total` is kept for older callers."""
         medicine = self.get_object()
-        batches = medicine.batches.filter(quantity_remaining__gt=0).order_by("expiry_date")
+        batches = list(_fefo(medicine.batches.filter(quantity_remaining__gt=0)))
+        total = sum(b.quantity_remaining for b in batches)
         return Response({
             "medicine": medicine.id,
-            "total": sum(b.quantity_remaining for b in batches),
+            "quantity": total,
+            "total": total,
             "batches": MedicineBatchSerializer(batches, many=True).data,
         })
 
@@ -314,9 +331,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
         s.is_valid(raise_exception=True)
         target, reason = s.validated_data["quantity"], s.validated_data["reason"]
 
-        batches = list(
-            medicine.batches.select_for_update().filter(quantity_remaining__gt=0).order_by("expiry_date")
-        )
+        batches = list(_fefo(medicine.batches.select_for_update().filter(quantity_remaining__gt=0)))
         current = sum(b.quantity_remaining for b in batches)
         diff = target - current
 
@@ -324,7 +339,8 @@ class MedicineViewSet(viewsets.ModelViewSet):
             batch = batches[-1] if batches else MedicineBatch.objects.create(
                 medicine=medicine, batch_number=f"ADJ-{timezone.now():%Y%m%d%H%M%S}",
                 quantity_received=0, quantity_remaining=0,
-                expiry_date=timezone.now().date() + timedelta(days=365),
+                expiry_date=(timezone.now().date() + timedelta(days=365))
+                if ShopSettings.load().tracks_expiry else None,
             )
             batch.quantity_remaining += diff
             batch.quantity_received += diff
@@ -342,14 +358,15 @@ class MedicineViewSet(viewsets.ModelViewSet):
                 to_remove -= take
 
         medicine = _stock_annotated(Medicine.objects.filter(pk=medicine.pk)).get()
-        return Response(MedicineAutocompleteSerializer(medicine).data)
+        data = MedicineAutocompleteSerializer(medicine).data
+        return Response({**data, "medicine": data})  # the edit modal reads r.medicine
 
 
 class MedicineBatchViewSet(viewsets.ModelViewSet):
     serializer_class = MedicineBatchSerializer
 
     def get_queryset(self):
-        qs = MedicineBatch.objects.select_related("medicine", "supplier").order_by("expiry_date")
+        qs = _fefo(MedicineBatch.objects.select_related("medicine", "supplier"))
         if self.request.query_params.get("medicine"):
             qs = qs.filter(medicine_id=self.request.query_params["medicine"])
         return qs
@@ -372,6 +389,7 @@ class MedicineBatchViewSet(viewsets.ModelViewSet):
     def expiring_soon(self, request):
         days = int(request.query_params.get("days", 90))
         cutoff = timezone.now().date() + timedelta(days=days)
+        # Batches without an expiry date never match `expiry_date__lte`, so they are skipped.
         qs = self.get_queryset().filter(quantity_remaining__gt=0, expiry_date__lte=cutoff)
         return Response(MedicineBatchSerializer(qs, many=True).data)
 
@@ -451,13 +469,12 @@ class OTCSaleViewSet(viewsets.ReadOnlyModelViewSet):
         return (line_amount / quantity).quantize(Decimal("0.01")), line_amount
 
     def _add_items(self, sale, items, user):
-        """FEFO batch pick + deduct + ledger. Returns the subtotal."""
+        """FEFO batch pick (no-expiry batches oldest first) + deduct + ledger. Returns the subtotal."""
         subtotal = Decimal("0")
         for it in items:
             medicine, qty = it["medicine"], it["quantity"]
-            batch = (MedicineBatch.objects.select_for_update()
-                     .filter(medicine=medicine, quantity_remaining__gte=qty)
-                     .order_by("expiry_date").first())
+            batch = _fefo(MedicineBatch.objects.select_for_update()
+                          .filter(medicine=medicine, quantity_remaining__gte=qty)).first()
             if not batch:
                 raise OutOfStockError(f"Insufficient stock for {medicine.name}.")
             unit_price, line_total = self._price_line(medicine, qty, it.get("line_amount"))
@@ -629,6 +646,7 @@ def reports_summary(request):
     live = MedicineBatch.objects.filter(quantity_remaining__gt=0)
     stock_value = live.aggregate(v=Sum(ExpressionWrapper(
         F("quantity_remaining") * F("medicine__unit_price"), output_field=DecimalField())))["v"]
+    # Batches with no expiry date never match the expiry filters below.
     stock = {
         "medicines": len(meds),
         "low_stock": sum(1 for m in meds if 0 < (m.stock_qty or 0) <= m.reorder_level),
@@ -738,7 +756,11 @@ def dashboard_summary(request):
     meds = list(_stock_annotated(Medicine.objects.filter(is_visible=True)))
     low = [m for m in meds if (m.stock_qty or 0) <= m.reorder_level]
     cutoff = today + timedelta(days=settings_row.expiry_alert_days)
-    expiring = MedicineBatch.objects.filter(quantity_remaining__gt=0, expiry_date__lte=cutoff).count()
+    # Shops that do not track expiry never get expiry alerts.
+    expiring = (
+        MedicineBatch.objects.filter(quantity_remaining__gt=0, expiry_date__lte=cutoff).count()
+        if settings_row.tracks_expiry else 0
+    )
 
     recent = (scope.select_related("served_by").prefetch_related("items__medicine")
               .order_by("-sold_at")[:8])
@@ -813,8 +835,11 @@ def stock_report(request):
                      "status": "OUT" if qty == 0 else ("LOW" if qty <= m.reorder_level else "OK")})
     today = timezone.localdate()
     cutoff = today + timedelta(days=cfg.expiry_alert_days)
-    batches = (MedicineBatch.objects.select_related("medicine")
-               .filter(quantity_remaining__gt=0, expiry_date__lte=cutoff).order_by("expiry_date"))
+    if cfg.tracks_expiry:
+        batches = (MedicineBatch.objects.select_related("medicine")
+                   .filter(quantity_remaining__gt=0, expiry_date__lte=cutoff).order_by("expiry_date"))
+    else:
+        batches = []
     return Response({
         "total_value": _money(value),
         "total_products": len(rows),
@@ -1030,7 +1055,6 @@ def _stk_push(phone, amount, reference):
     return resp.json()
 
 
-
 def _settle_payment(pay, paid, receipt):
     """Credit the wallet for a confirmed M-Pesa payment and, if it was for a bundle, buy it straight away."""
     shop = Shop.objects.get(pk=pay.shop_id)
@@ -1045,7 +1069,6 @@ def _settle_payment(pay, paid, receipt):
         entitlements.buy_bundle(shop, bundle, quantity=pay.quantity, auto_renew=pay.auto_renew)
     except entitlements.InsufficientBalance:
         pass  # price changed mid-payment: money stays in the wallet
-
 
 
 @api_view(["POST"])
@@ -1119,7 +1142,6 @@ def payment_status_view(request, checkout_id):
     return Response({"status": pay.status, "bundle": pay.bundle_code, "detail": pay.result_desc})
 
 
-
 @api_view(["POST"])
 @authentication_classes([])
 @permission_classes([AllowAny])
@@ -1158,7 +1180,7 @@ def mpesa_callback(request, token):
         pay.status, pay.mpesa_receipt = PaymentStatus.SUCCESS, receipt
         pay.save(update_fields=["status", "mpesa_receipt", "updated_at"])
         _settle_payment(pay, paid, receipt)
-        
+
     return Response(ok)
 
 
@@ -1186,11 +1208,23 @@ def register_shop(request):
         user.set_password(d["password"])
         user.save()
         with tenant_context(shop):
-            ShopSettings.objects.create(shop=shop, name=d["shop_name"], phone=d["phone"], email=d["email"])
+            btype = d["business_type"]
+            tracks = d["tracks_expiry"] if d.get("tracks_expiry") is not None else btype in EXPIRY_TRACKED_TYPES
+            ShopSettings.objects.create(shop=shop, name=d["shop_name"], phone=d["phone"], email=d["email"],
+                                        business_type=btype, tracks_expiry=tracks)
         entitlements.start_trial(shop)
     refresh = RefreshToken.for_user(user)
     return Response({"access": str(refresh.access_token), "refresh": str(refresh),
                      "user": UserSerializer(user).data}, status=status.HTTP_201_CREATED)
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+def business_types(request):
+    """Public list of business types, so a sign-up dropdown needs no hardcoding."""
+    return Response([{"value": v, "label": label, "tracks_expiry": v in EXPIRY_TRACKED_TYPES}
+                     for v, label in BusinessType.choices])
 
 
 # ---------------------------------------------------------------------------
@@ -1201,26 +1235,26 @@ class NotificationSerializer(serializers.ModelSerializer):
         model = Notification
         fields = ["id", "title", "message", "link", "priority", "is_read", "read_at", "created_at"]
         read_only_fields = fields
- 
- 
+
+
 class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
     """Everyone only ever sees their own notifications."""
- 
+
     serializer_class = NotificationSerializer
     permission_classes = [IsAuthenticated]
- 
+
     def get_queryset(self):
         return Notification.objects.filter(recipient=self.request.user).order_by("-created_at")
- 
+
     @action(detail=False, methods=["get"])
     def unread(self, request):
         qs = self.get_queryset().filter(is_read=False)[:50]
         return Response(NotificationSerializer(qs, many=True).data)
- 
+
     @action(detail=False, methods=["get"], url_path="unread-count")
     def unread_count(self, request):
         return Response({"unread_count": self.get_queryset().filter(is_read=False).count()})
- 
+
     @action(detail=True, methods=["post"], url_path="mark-read")
     def mark_read(self, request, pk=None):
         n = self.get_object()
@@ -1228,32 +1262,32 @@ class NotificationViewSet(viewsets.ReadOnlyModelViewSet):
             n.is_read, n.read_at = True, timezone.now()
             n.save(update_fields=["is_read", "read_at", "updated_at"])
         return Response(NotificationSerializer(n).data)
- 
+
     @action(detail=False, methods=["post"], url_path="mark-all-read")
     def mark_all_read(self, request):
         now = timezone.now()
         updated = self.get_queryset().filter(is_read=False).update(is_read=True, read_at=now)
         return Response({"marked": updated})
- 
- 
+
+
 # ---------------------------------------------------------------------------
 # Messaging
 # ---------------------------------------------------------------------------
 def _name(u):
     return (u.get_full_name() or u.username) if u else None
- 
- 
+
+
 def _user_brief(u):
     return {"id": str(u.id), "username": u.username, "full_name": _name(u), "role": u.role}
- 
- 
+
+
 def _unread_for(conv, participant):
     qs = conv.messages.exclude(sender_id=participant.user_id)
     if participant.last_read_at:
         qs = qs.filter(created_at__gt=participant.last_read_at)
     return qs.count()
- 
- 
+
+
 def serialize_conversation(conv, user):
     links = list(conv.participant_links.select_related("user"))
     me = next((p for p in links if p.user_id == user.id), None)
@@ -1273,32 +1307,32 @@ def serialize_conversation(conv, user):
         "unread_count": _unread_for(conv, me) if me else 0,
         "updated_at": conv.updated_at,
     }
- 
- 
+
+
 def serialize_message(m, user):
     return {
         "id": str(m.id), "conversation": str(m.conversation_id),
         "sender": str(m.sender_id) if m.sender_id else None, "sender_name": _name(m.sender),
         "body": m.body, "created_at": m.created_at, "is_mine": m.sender_id == user.id,
     }
- 
- 
+
+
 class ConversationViewSet(viewsets.ViewSet):
     """Only participants can see or post in a conversation."""
- 
+
     permission_classes = [IsAuthenticated]
- 
+
     def _mine(self, request):
         return Conversation.objects.filter(participants=request.user)
- 
+
     def list(self, request):
         convs = self._mine(request).order_by("-updated_at")
         return Response([serialize_conversation(c, request.user) for c in convs])
- 
+
     def retrieve(self, request, pk=None):
         conv = get_object_or_404(self._mine(request), pk=pk)
         return Response(serialize_conversation(conv, request.user))
- 
+
     def create(self, request):
         """Start (or reopen) a direct chat: {"user_id": "<uuid>"}.
         Or a group: {"user_ids": [...], "title": "Shift team"}."""
@@ -1311,7 +1345,7 @@ class ConversationViewSet(viewsets.ViewSet):
             for u in [request.user, *users]:
                 ConversationParticipant.objects.create(conversation=conv, user=u)
             return Response(serialize_conversation(conv, request.user), status=201)
- 
+
         uid = request.data.get("user_id")
         if not uid:
             raise ValidationError({"user_id": "This field is required."})
@@ -1321,7 +1355,7 @@ class ConversationViewSet(viewsets.ViewSet):
             raise ValidationError({"user_id": "User not found."})
         if other.pk == request.user.pk:
             raise ValidationError({"user_id": "You cannot message yourself."})
- 
+
         conv = (Conversation.objects.filter(is_group=False, participants=request.user)
                 .filter(participants=other).first())
         created = conv is None
@@ -1330,11 +1364,11 @@ class ConversationViewSet(viewsets.ViewSet):
             for u in (request.user, other):
                 ConversationParticipant.objects.create(conversation=conv, user=u)
         return Response(serialize_conversation(conv, request.user), status=201 if created else 200)
- 
+
     @action(detail=True, methods=["get", "post"], url_path="messages")
     def messages(self, request, pk=None):
         conv = get_object_or_404(self._mine(request), pk=pk)
- 
+
         if request.method == "POST":
             body = (request.data.get("body") or request.data.get("text") or "").strip()
             if not body:
@@ -1346,22 +1380,22 @@ class ConversationViewSet(viewsets.ViewSet):
             ConversationParticipant.objects.filter(conversation=conv, user=request.user)\
                 .update(last_read_at=msg.created_at)
             return Response(serialize_message(msg, request.user), status=201)
- 
+
         qs = conv.messages.select_related("sender")
         after = request.query_params.get("after")  # ISO timestamp, handy for polling
         if after:
             qs = qs.filter(created_at__gt=after)
         msgs = list(qs.order_by("-created_at")[:200])[::-1]
         return Response([serialize_message(m, request.user) for m in msgs])
- 
+
     @action(detail=True, methods=["post"])
     def read(self, request, pk=None):
         conv = get_object_or_404(self._mine(request), pk=pk)
         ConversationParticipant.objects.filter(conversation=conv, user=request.user)\
             .update(last_read_at=timezone.now())
         return Response({"detail": "Marked as read."})
- 
- 
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def unread_message_count(request):
@@ -1369,8 +1403,8 @@ def unread_message_count(request):
     for p in ConversationParticipant.objects.filter(user=request.user).select_related("conversation"):
         total += _unread_for(p.conversation, p)
     return Response({"unread_count": total})
- 
- 
+
+
 @api_view(["GET"])
 @permission_classes([IsAuthenticated])
 def chat_users(request):
