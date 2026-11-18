@@ -1,0 +1,632 @@
+/* ==========================================================================
+   src/styles/messaging.css
+   Notifications page, Messages page and the navbar dropdowns (bell + chat).
+
+   Built only from the tokens in main.css section 1 (--space-*, --primary-*,
+   --border-*, --radius-*, ...) and sits on top of its component classes
+   (.card, .badge, .avatar, .modal, .tabs, .btn ...). Nothing here hard-codes
+   a colour, so it follows any change you make to the tokens.
+
+   Import it from the files that use it:  import "../styles/messaging.css";
+   ========================================================================== */
+
+/* ==========================================================================
+   1. NAVBAR DROPDOWNS (shared by NotificationBell and ChatDropdown)
+   ========================================================================== */
+
+.nav-pop {
+  position: relative;
+}
+
+/* Count badge that sits on a .navbar__icon-btn */
+.navbar__icon-badge {
+  position: absolute;
+  top: 2px;
+  right: 0;
+  min-width: 18px;
+  height: 18px;
+  padding: 0 5px;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  border: 2px solid var(--surface);
+  background: var(--danger);
+  color: var(--text-inverse);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-bold);
+  line-height: 1;
+  pointer-events: none;
+}
+
+.nav-pop__panel {
+  position: absolute;
+  top: calc(100% + var(--space-2));
+  right: 0;
+  width: min(380px, calc(100vw - var(--space-6)));
+  max-height: min(480px, calc(100dvh - var(--navbar-height) - var(--space-6)));
+  display: flex;
+  flex-direction: column;
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  z-index: var(--z-dropdown);
+  animation: dropdown-in var(--duration-fast) var(--ease-standard);
+}
+
+.nav-pop__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.nav-pop__title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+}
+
+.nav-pop__body {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.nav-pop__item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 3px solid transparent;
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.nav-pop__item:last-child {
+  border-bottom: 0;
+}
+
+.nav-pop__item:hover {
+  background: var(--surface-hover);
+}
+
+.nav-pop__item.is-unread {
+  background: var(--surface-selected);
+}
+
+.nav-pop__item.is-unread:hover {
+  background: var(--primary-100);
+}
+
+.nav-pop__item--critical { border-left-color: var(--danger); }
+.nav-pop__item--high { border-left-color: var(--warning); }
+.nav-pop__item--normal { border-left-color: var(--primary-500); }
+.nav-pop__item--low { border-left-color: var(--gray-300); }
+
+.nav-pop__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.nav-pop__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.nav-pop__item-title {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.nav-pop__item-text {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  line-height: var(--lh-snug);
+  display: -webkit-box;
+  -webkit-line-clamp: 2;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.nav-pop__item-time {
+  font-size: var(--fs-2xs);
+  color: var(--text-tertiary);
+  flex-shrink: 0;
+}
+
+.nav-pop__empty {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+
+.nav-pop__empty i {
+  display: block;
+  margin-bottom: var(--space-2);
+  font-size: var(--fs-2xl);
+  color: var(--gray-300);
+}
+
+.nav-pop__foot {
+  padding: var(--space-2);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.nav-pop__all {
+  display: block;
+  width: 100%;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  text-align: center;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-link);
+}
+
+.nav-pop__all:hover {
+  background: var(--surface-hover);
+}
+
+/* Small screens: the panel spans the screen under the navbar.
+   .navbar has transform: translateZ(0), so "fixed" is measured from the navbar itself,
+   which is why top is just below the navbar height. */
+@media (max-width: 520px) {
+  .nav-pop {
+    position: static;
+  }
+
+  .nav-pop__panel {
+    position: fixed;
+    top: calc(var(--navbar-height) + var(--space-1));
+    left: var(--space-3);
+    right: var(--space-3);
+    width: auto;
+  }
+}
+
+/* ==========================================================================
+   2. NOTIFICATIONS PAGE
+   ========================================================================== */
+
+.ntf-card {
+  overflow: hidden;
+}
+
+.ntf-tabs {
+  padding: 0 var(--space-4);
+}
+
+.ntf-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.ntf-item {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+  padding: var(--space-4) var(--space-5);
+  border-bottom: 1px solid var(--border-subtle);
+  border-left: 3px solid transparent;
+}
+
+.ntf-item:last-child {
+  border-bottom: 0;
+}
+
+.ntf-item.is-unread {
+  background: var(--surface-selected);
+}
+
+.ntf-item--critical { border-left-color: var(--danger); }
+.ntf-item--high { border-left-color: var(--warning); }
+.ntf-item--normal { border-left-color: var(--primary-500); }
+.ntf-item--low { border-left-color: var(--gray-300); }
+
+.ntf-icon {
+  width: 36px;
+  height: 36px;
+  flex-shrink: 0;
+  display: grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  font-size: var(--fs-md);
+}
+
+.ntf-icon--critical { background: var(--danger-soft); color: var(--danger-strong); }
+.ntf-icon--high { background: var(--warning-soft); color: var(--warning-strong); }
+.ntf-icon--normal { background: var(--primary-soft); color: var(--primary-700); }
+.ntf-icon--low { background: var(--gray-100); color: var(--text-tertiary); }
+
+.ntf-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  text-align: left;
+}
+
+button.ntf-main {
+  cursor: pointer;
+}
+
+.ntf-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+}
+
+.ntf-item.is-unread .ntf-title {
+  font-weight: var(--fw-semibold);
+}
+
+.ntf-dot {
+  width: 8px;
+  height: 8px;
+  flex-shrink: 0;
+  border-radius: var(--radius-full);
+  background: var(--primary-600);
+}
+
+.ntf-text {
+  font-size: var(--fs-sm);
+  color: var(--text-secondary);
+  line-height: var(--lh-normal);
+}
+
+.ntf-meta {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+@media (max-width: 640px) {
+  .ntf-item {
+    padding: var(--space-3) var(--space-4);
+  }
+}
+
+/* ==========================================================================
+   3. MESSAGES PAGE
+   ========================================================================== */
+
+.msgs {
+  display: grid;
+  grid-template-columns: 340px minmax(0, 1fr);
+  height: calc(100dvh - var(--navbar-height) - 15rem);
+  min-height: 460px;
+  overflow: hidden;
+}
+
+/* ---- left: conversations ---- */
+.msgs__side {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--border-subtle);
+}
+
+.msgs__search {
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--border-subtle);
+}
+
+.msgs__list {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.msgs__hint {
+  padding: var(--space-8) var(--space-4);
+  text-align: center;
+  font-size: var(--fs-sm);
+  color: var(--text-tertiary);
+}
+
+.msgs-conv {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  width: 100%;
+  padding: var(--space-3) var(--space-4);
+  text-align: left;
+  border-bottom: 1px solid var(--border-subtle);
+  transition: background var(--duration-fast) var(--ease-standard);
+}
+
+.msgs-conv:hover {
+  background: var(--surface-hover);
+}
+
+.msgs-conv.is-active {
+  background: var(--surface-selected);
+}
+
+.msgs-conv__main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.msgs-conv__row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+
+.msgs-conv__name {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msgs-conv.is-unread .msgs-conv__name {
+  font-weight: var(--fw-bold);
+}
+
+.msgs-conv__time {
+  flex-shrink: 0;
+  font-size: var(--fs-2xs);
+  color: var(--text-tertiary);
+}
+
+.msgs-conv__last {
+  font-size: var(--fs-xs);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.msgs-unread {
+  flex-shrink: 0;
+  min-width: 20px;
+  height: 20px;
+  padding: 0 6px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: var(--radius-full);
+  background: var(--primary-600);
+  color: var(--text-inverse);
+  font-size: var(--fs-2xs);
+  font-weight: var(--fw-semibold);
+}
+
+.avatar.msgs-avatar--group {
+  background: var(--primary-600);
+  color: var(--text-inverse);
+}
+
+/* ---- right: thread ---- */
+.msgs__main {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  background: var(--surface-sunken);
+}
+
+.msgs__thread-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border-bottom: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+.msgs__thread-info {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+.msgs__thread-name {
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-semibold);
+  color: var(--text-primary);
+}
+
+.msgs__thread-sub {
+  font-size: var(--fs-xs);
+  color: var(--text-tertiary);
+}
+
+.msgs__back {
+  display: none;
+}
+
+.msgs__scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: var(--space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.msgs__day {
+  align-self: center;
+  margin: var(--space-3) 0;
+}
+
+.msgs-row {
+  display: flex;
+}
+
+.msgs-row.is-mine {
+  justify-content: flex-end;
+}
+
+.msgs-bubble {
+  max-width: min(520px, 80%);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: var(--space-2) var(--space-3);
+  background: var(--surface);
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-lg) var(--radius-xs);
+}
+
+.msgs-row.is-mine .msgs-bubble {
+  background: var(--primary-600);
+  border-color: var(--primary-600);
+  color: var(--text-inverse);
+  border-radius: var(--radius-lg) var(--radius-lg) var(--radius-xs) var(--radius-lg);
+}
+
+.msgs-bubble__sender {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-semibold);
+  color: var(--primary-700);
+}
+
+.msgs-bubble__text {
+  font-size: var(--fs-sm);
+  line-height: var(--lh-snug);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.msgs-bubble__time {
+  align-self: flex-end;
+  font-size: var(--fs-2xs);
+  opacity: 0.7;
+}
+
+.msgs__notice {
+  margin: 0 var(--space-4) var(--space-2);
+}
+
+.msgs__composer {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-4);
+  background: var(--surface);
+  border-top: 1px solid var(--border-subtle);
+  flex-shrink: 0;
+}
+
+/* .textarea in main.css is 96px tall; the chat box starts at one line and grows */
+.msgs .msgs__input {
+  flex: 1;
+  height: auto;
+  min-height: 40px;
+  max-height: 120px;
+  padding: 9px var(--space-3);
+  resize: none;
+  field-sizing: content;
+}
+
+.msgs__placeholder {
+  margin: auto;
+}
+
+/* ---- New chat dialog ---- */
+.msgs-users {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 320px;
+  overflow-y: auto;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+}
+
+.msgs-user {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--border-subtle);
+  cursor: pointer;
+}
+
+.msgs-user:last-child {
+  border-bottom: 0;
+}
+
+.msgs-user:hover {
+  background: var(--surface-hover);
+}
+
+.msgs-user__name {
+  display: flex;
+  flex-direction: column;
+  font-size: var(--fs-sm);
+  font-weight: var(--fw-medium);
+  color: var(--text-primary);
+}
+
+.msgs-user__name small {
+  font-size: var(--fs-xs);
+  font-weight: var(--fw-regular);
+  color: var(--text-tertiary);
+}
+
+/* ---- Small screens: one pane at a time ---- */
+@media (max-width: 767px) {
+  .msgs {
+    grid-template-columns: minmax(0, 1fr);
+    height: calc(100dvh - var(--navbar-height) - 13rem);
+  }
+
+  .msgs__main {
+    display: none;
+  }
+
+  .msgs.is-thread-open .msgs__side {
+    display: none;
+  }
+
+  .msgs.is-thread-open .msgs__main {
+    display: flex;
+  }
+
+  .msgs__back {
+    display: grid;
+  }
+
+  .msgs-bubble {
+    max-width: 88%;
+  }
+}

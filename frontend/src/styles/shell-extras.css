@@ -1,0 +1,37 @@
+/* src/styles/shell-extras.css
+   Rules the HMIS Sidebar/Navbar use that were not in main.css.
+   Import AFTER main.css. */
+
+.sidebar-backdrop { display: none; }
+.sidebar__close { display: none; }
+.show-mobile { display: none; }
+
+.navbar__breadcrumbs.is-hidden { visibility: hidden; }
+
+@media (max-width: 960px) {
+  .sidebar-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    background: var(--surface-overlay);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity var(--duration-base) var(--ease-standard);
+    z-index: calc(var(--z-sidebar) - 1);
+  }
+  .app-shell.is-sidebar-open .sidebar-backdrop { opacity: 1; pointer-events: auto; }
+
+  .sidebar__close {
+    display: grid;
+    place-items: center;
+    margin-left: auto;
+    width: 34px;
+    height: 34px;
+    border-radius: var(--radius-md);
+    color: var(--text-secondary);
+  }
+  .sidebar__close:hover { background: var(--surface-hover); color: var(--text-primary); }
+
+  .app-shell.is-sidebar-open.is-sidebar-collapsed .sidebar { transform: translateX(0); }
+  .show-mobile { display: block; }
+}

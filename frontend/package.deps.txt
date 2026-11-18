@@ -1,0 +1,1 @@
+npm i axios react-router-dom jspdf jspdf-autotable   # plus whatever icons lib your pages import
