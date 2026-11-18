@@ -39,7 +39,7 @@ class UserSerializer(serializers.ModelSerializer):
 
 
 class MedicineField(serializers.PrimaryKeyRelatedField):
-    """Evaluated per request, so it only offers THIS shop's medicines."""
+    """Evaluated per request, so it only offers THIS shop's products."""
 
     def get_queryset(self):
         return Medicine.objects.all()
@@ -71,7 +71,7 @@ class ChangePasswordSerializer(serializers.Serializer):
 
 
 # ---------------------------------------------------------------------------
-# Pharmacy stock
+# Stock (products)
 # ---------------------------------------------------------------------------
 class SupplierSerializer(serializers.ModelSerializer):
     class Meta:
@@ -87,9 +87,19 @@ class MedicineSerializer(serializers.ModelSerializer):
     class Meta:
         model = Medicine
         fields = ["id", "name", "generic_name", "category", "unit", "unit_price",
-                  "insurance_price", "reorder_level", "is_visible",
+                  "insurance_price", "reorder_level", "is_visible", "barcode", "sku",
                   "current_stock", "is_low_stock", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+    def validate_barcode(self, value):
+        value = value.strip()
+        if value:
+            dupes = Medicine.objects.filter(barcode=value)  # tenant-scoped
+            if self.instance:
+                dupes = dupes.exclude(pk=self.instance.pk)
+            if dupes.exists():
+                raise serializers.ValidationError("Another product already uses this barcode.")
+        return value
 
 
 class MedicineAutocompleteSerializer(serializers.ModelSerializer):
@@ -101,7 +111,7 @@ class MedicineAutocompleteSerializer(serializers.ModelSerializer):
     class Meta:
         model = Medicine
         fields = ["id", "name", "generic_name", "category", "unit", "unit_price",
-                  "insurance_price", "reorder_level", "is_visible",
+                  "insurance_price", "reorder_level", "is_visible", "barcode", "sku",
                   "current_stock", "is_low_stock"]
 
     def get_current_stock(self, obj):
@@ -122,6 +132,13 @@ class MedicineBatchSerializer(serializers.ModelSerializer):
                   "expiry_date", "received_date"]
         read_only_fields = ["id", "received_date", "quantity_remaining"]
 
+    def validate(self, attrs):
+        # Expiry is only mandatory for shops that track it (pharmacy, supermarket...).
+        if "expiry_date" in attrs or self.instance is None:
+            if attrs.get("expiry_date") is None and ShopSettings.load().tracks_expiry:
+                raise serializers.ValidationError({"expiry_date": "Expiry date is required."})
+        return attrs
+
 
 class StockTransactionSerializer(serializers.ModelSerializer):
     medicine_name = serializers.CharField(source="medicine.name", read_only=True)
@@ -141,7 +158,7 @@ class StockTransactionSerializer(serializers.ModelSerializer):
 
 
 class QuickAddMedicineSerializer(serializers.Serializer):
-    """Create medicine + first batch + STOCK_IN in one go (from the POS screen)."""
+    """Create product + first batch + STOCK_IN in one go (from the POS screen)."""
 
     name = serializers.CharField(max_length=150)
     generic_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
@@ -151,7 +168,9 @@ class QuickAddMedicineSerializer(serializers.Serializer):
     reorder_level = serializers.IntegerField(min_value=0, required=False, default=20)
     quantity = serializers.IntegerField(min_value=1)
     batch_number = serializers.CharField(max_length=60, required=False, allow_blank=True, default="")
-    expiry_date = serializers.DateField()
+    expiry_date = serializers.DateField(required=False, allow_null=True, default=None)
+    barcode = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
+    sku = serializers.CharField(max_length=60, required=False, allow_blank=True, default="")
 
 
 class SetMedicineStockSerializer(serializers.Serializer):
@@ -240,14 +259,14 @@ class OTCSaleAmendmentSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 # Settings & subscription
 # ---------------------------------------------------------------------------
-from api.models import ShopSettings, SubscriptionRequest  # noqa: E402
+from api.models import BusinessType, EXPIRY_TRACKED_TYPES, ShopSettings, SubscriptionRequest  # noqa: E402,F401
 
 
 class ShopSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShopSettings
         fields = ["name", "address", "phone", "email", "kra_pin", "currency",
-                  "receipt_footer", "expiry_alert_days"]
+                  "receipt_footer", "expiry_alert_days", "business_type", "tracks_expiry"]
 
 
 class SubscriptionRequestSerializer(serializers.ModelSerializer):
@@ -289,6 +308,9 @@ class RegisterSerializer(serializers.Serializer):
     first_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
     email = serializers.EmailField(required=False, allow_blank=True, default="")
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
+    # Optional: the current sign-up form does not send these, so new shops default to a pharmacy.
+    business_type = serializers.ChoiceField(choices=BusinessType.choices, required=False, default=BusinessType.PHARMACY)
+    tracks_expiry = serializers.BooleanField(required=False, default=None, allow_null=True)
 
     def validate_password(self, value):
         validate_password(value)
