@@ -1,11 +1,15 @@
 # api/models.py
 #
-# Medicore POS: pharmacy point-of-sale models (multi-tenant SaaS, single `api` app).
+# Medicore POS: multi-business point-of-sale models (multi-tenant SaaS, single `api` app).
+# Serves pharmacies, supermarkets, mini-marts, general retail, hardware, electronics, boutiques...
+#
+# NOTE: the model names (Medicine, MedicineBatch, ...) are kept so the frontend, URLs and
+# migrations keep working. "Medicine" is simply the generic *product* model.
 #
 # Sections:
 #   1. Abstract base      - UUID pk, timestamps, soft delete
 #   2. Accounts           - Role, User
-#   3. Pharmacy stock     - Supplier, Medicine, MedicineBatch, StockTransaction
+#   3. Stock              - Supplier, Medicine (product), MedicineBatch, StockTransaction
 #   4. Sales (POS)        - OTCSale, OTCSaleItem, OTCSaleAmendment
 #   5. Shop settings, legacy Subscription, SubscriptionRequest, Notification, chat
 #   6. SaaS               - Shop, Bundle, BundlePurchase, WalletTransaction, MpesaPayment
@@ -59,7 +63,7 @@ class BaseModel(models.Model):
 class Role(models.TextChoices):
     # Same role names as the HMIS so utils/roles.js and the sidebar keep working.
     SUPER_ADMIN = "SUPER_ADMIN", "Super Admin / Owner"
-    PHARMACIST = "PHARMACIST", "Pharmacist"
+    PHARMACIST = "PHARMACIST", "Pharmacist / Store Manager"
     CASHIER = "CASHIER", "Cashier"
     ACCOUNTANT = "ACCOUNTANT", "Accountant"
 
@@ -88,7 +92,7 @@ class PaymentMethod(models.TextChoices):
 
 
 # ---------------------------------------------------------------------------
-# 3. Pharmacy stock
+# 3. Stock
 # ---------------------------------------------------------------------------
 class Supplier(BaseModel):
     name = models.CharField(max_length=150)
@@ -104,21 +108,26 @@ class Supplier(BaseModel):
 
 
 class Medicine(BaseModel):
-    """A product in the catalog. Stock is derived from its batches."""
+    """A product in the catalog (medicine, grocery item, any retail item).
+    Stock is derived from its batches."""
 
     name = models.CharField(max_length=150)
     generic_name = models.CharField(max_length=150, blank=True)
     category = models.CharField(max_length=100, blank=True)
-    unit = models.CharField(max_length=30, default="tablet")  # tablet, syrup, injection...
+    unit = models.CharField(max_length=30, default="tablet")  # tablet, syrup, piece, pack, bottle...
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     insurance_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     reorder_level = models.PositiveIntegerField(default=20)
+    barcode = models.CharField(max_length=64, blank=True, db_index=True)
+    sku = models.CharField(max_length=60, blank=True)
     is_visible = models.BooleanField(
         default=True, help_text="When False, hidden from the POS grid and pickers (editors can still un-hide it)."
     )
 
     class Meta:
         db_table = "medicines"
+        verbose_name = "product"
+        verbose_name_plural = "products"
 
     @property
     def current_stock(self):
@@ -138,7 +147,8 @@ class MedicineBatch(BaseModel):
     batch_number = models.CharField(max_length=60)
     quantity_received = models.PositiveIntegerField()
     quantity_remaining = models.PositiveIntegerField()
-    expiry_date = models.DateField()
+    # Optional: shops that do not track expiry (hardware, clothes, electronics) leave it empty.
+    expiry_date = models.DateField(null=True, blank=True)
     received_date = models.DateField(auto_now_add=True)
 
     class Meta:
@@ -253,10 +263,32 @@ class OTCSaleAmendment(BaseModel):
 # ---------------------------------------------------------------------------
 # 5. Shop settings & subscription
 # ---------------------------------------------------------------------------
+class BusinessType(models.TextChoices):
+    PHARMACY = "PHARMACY", "Pharmacy"
+    SUPERMARKET = "SUPERMARKET", "Supermarket"
+    MINIMART = "MINIMART", "Mini-mart / Grocery"
+    RETAIL = "RETAIL", "General retail shop"
+    HARDWARE = "HARDWARE", "Hardware"
+    ELECTRONICS = "ELECTRONICS", "Electronics"
+    BOUTIQUE = "BOUTIQUE", "Boutique / Clothing"
+    OTHER = "OTHER", "Other"
+
+
+# Business types where goods expire, so expiry dates are tracked by default.
+# (Plain string values, so `"PHARMACY" in EXPIRY_TRACKED_TYPES` works for raw strings too.)
+EXPIRY_TRACKED_TYPES = {
+    BusinessType.PHARMACY.value,
+    BusinessType.SUPERMARKET.value,
+    BusinessType.MINIMART.value,
+}
+
+
 class ShopSettings(ShopOwned):
     """One row per shop: details and alert thresholds."""
 
-    name = models.CharField(max_length=150, default="Medicore Pharmacy")
+    name = models.CharField(max_length=150, default="My Shop")
+    business_type = models.CharField(max_length=20, choices=BusinessType.choices, default=BusinessType.PHARMACY)
+    tracks_expiry = models.BooleanField(default=True, help_text="Ask for and alert on batch expiry dates.")
     address = models.CharField(max_length=255, blank=True)
     phone = models.CharField(max_length=30, blank=True)
     email = models.EmailField(blank=True)
@@ -351,11 +383,11 @@ class NotificationPriority(models.TextChoices):
     HIGH = "HIGH", "High"
     NORMAL = "NORMAL", "Normal"
     LOW = "LOW", "Low"
- 
- 
+
+
 class Notification(BaseModel):
     """One alert for one user (bell dropdown)."""
- 
+
     recipient = models.ForeignKey(User, on_delete=models.CASCADE, related_name="notifications")
     title = models.CharField(max_length=200)
     message = models.TextField(blank=True)
@@ -366,42 +398,42 @@ class Notification(BaseModel):
     read_at = models.DateTimeField(null=True, blank=True)
     # Lets scheduled jobs avoid sending the same alert twice (e.g. "low-stock:2026-11-04").
     dedupe_key = models.CharField(max_length=100, blank=True, db_index=True)
- 
+
     class Meta:
         db_table = "notifications"
         ordering = ["-created_at"]
- 
+
     def __str__(self):
         return f"{self.recipient_id}: {self.title}"
- 
- 
+
+
 class Conversation(BaseModel):
     """A direct (2 people) or group chat between staff."""
- 
+
     title = models.CharField(max_length=150, blank=True)  # used for groups only
     is_group = models.BooleanField(default=False)
     participants = models.ManyToManyField(User, through="ConversationParticipant", related_name="conversations")
- 
+
     class Meta:
         db_table = "conversations"
         ordering = ["-updated_at"]
- 
- 
+
+
 class ConversationParticipant(models.Model):
     conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name="participant_links")
     user = models.ForeignKey(User, on_delete=models.CASCADE, related_name="conversation_links")
     last_read_at = models.DateTimeField(null=True, blank=True)
- 
+
     class Meta:
         db_table = "conversation_participants"
         unique_together = ("conversation", "user")
- 
- 
+
+
 class Message(BaseModel):
     conversation = models.ForeignKey(Conversation, on_delete=models.CASCADE, related_name="messages")
     sender = models.ForeignKey(User, null=True, on_delete=models.SET_NULL, related_name="sent_messages")
     body = models.TextField()
- 
+
     class Meta:
         db_table = "messages"
         ordering = ["created_at"]
@@ -541,7 +573,7 @@ class MpesaPayment(ShopOwned):
     bundle_code = models.CharField(max_length=20, blank=True, default="")
     quantity = models.PositiveIntegerField(default=1)
     auto_renew = models.BooleanField(default=False)
-    
+
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
