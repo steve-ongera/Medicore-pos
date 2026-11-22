@@ -8,10 +8,10 @@ from api.token_views import PlatformSafeTokenRefreshView
 router = DefaultRouter()
 router.register("users", views.UserViewSet, basename="user")
 router.register("suppliers", views.SupplierViewSet, basename="supplier")
-router.register("medicines", views.MedicineViewSet, basename="medicine")
-router.register("products", views.MedicineViewSet, basename="product")  # generic alias
-router.register("medicine-batches", views.MedicineBatchViewSet, basename="medicine-batch")
-router.register("product-batches", views.MedicineBatchViewSet, basename="product-batch")  # generic alias
+router.register("products", views.ProductViewSet, basename="product")
+router.register("medicines", views.ProductViewSet, basename="medicine")  # legacy alias, keeps the frontend working
+router.register("product-batches", views.ProductBatchViewSet, basename="product-batch")
+router.register("medicine-batches", views.ProductBatchViewSet, basename="medicine-batch")  # legacy alias
 router.register("stock-transactions", views.StockTransactionViewSet, basename="stock-transaction")
 router.register("otc-sales", views.OTCSaleViewSet, basename="otc-sale")
 

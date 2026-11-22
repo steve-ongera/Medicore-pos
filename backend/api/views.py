@@ -30,12 +30,12 @@ from django.shortcuts import get_object_or_404
 from rest_framework import serializers
 
 from api.models import (
-    Medicine,
-    MedicineBatch,
     OTCSale,
     OTCSaleAmendment,
     OTCSaleItem,
     PasswordResetCode,
+    Product,
+    ProductBatch,
     Role,
     ShopSettings,
     StockTransaction,
@@ -62,17 +62,17 @@ from api.permissions import (
 from api.serializers import (
     AddPaymentSerializer,
     ChangePasswordSerializer,
-    MedicineAutocompleteSerializer,
-    MedicineBatchSerializer,
-    MedicineSerializer,
     OTCSaleAmendmentSerializer,
     OTCSaleAmendSerializer,
     OTCSaleCreateSerializer,
     OTCSaleSerializer,
-    QuickAddMedicineSerializer,
+    ProductAutocompleteSerializer,
+    ProductBatchSerializer,
+    ProductSerializer,
+    QuickAddProductSerializer,
     RegisterSerializer,
     ResetPasswordSerializer,
-    SetMedicineStockSerializer,
+    SetProductStockSerializer,
     ShopSettingsSerializer,
     StockTransactionSerializer,
     SubscriptionRequestSerializer,
@@ -341,9 +341,9 @@ class UserViewSet(viewsets.ModelViewSet):
 # ---------------------------------------------------------------------------
 # Stock helpers
 # ---------------------------------------------------------------------------
-def _log(medicine, batch, kind, qty, reason, user):
+def _log(product, batch, kind, qty, reason, user):
     return StockTransaction.objects.create(
-        medicine=medicine, batch=batch, transaction_type=kind,
+        product=product, batch=batch, transaction_type=kind,
         quantity=qty, reason=reason, performed_by=user,
     )
 
@@ -359,8 +359,13 @@ def _fefo(qs):
     return qs.order_by(F("expiry_date").asc(nulls_last=True), "created_at")
 
 
+def _product_param(params):
+    """The product filter may arrive as the legacy ?medicine= or the new ?product=."""
+    return params.get("product") or params.get("medicine")
+
+
 # ---------------------------------------------------------------------------
-# Suppliers / Products (Medicine model) / Batches / Transactions
+# Suppliers / Products / Batches / Transactions
 # ---------------------------------------------------------------------------
 class SupplierViewSet(viewsets.ModelViewSet):
     serializer_class = SupplierSerializer
@@ -377,14 +382,14 @@ class SupplierViewSet(viewsets.ModelViewSet):
         instance.soft_delete()
 
 
-class MedicineViewSet(viewsets.ModelViewSet):
-    """Products. Served at /medicines/ (legacy) and /products/ (generic alias)."""
+class ProductViewSet(viewsets.ModelViewSet):
+    """Products. Served at /products/ and at the legacy /medicines/ alias."""
 
-    serializer_class = MedicineSerializer
+    serializer_class = ProductSerializer
     parser_classes = [JSONParser, MultiPartParser, FormParser]  # JSON, or multipart when an image is sent
 
     def get_queryset(self):
-        qs = Medicine.objects.all().order_by("name")
+        qs = Product.objects.all().order_by("name")
         p = self.request.query_params
         if p.get("category"):
             qs = qs.filter(category__iexact=p["category"])
@@ -406,7 +411,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
         return [CanEditMedicine()]
 
     def perform_create(self, serializer):
-        entitlements.enforce_limit(self.request.user.shop, "products", Medicine.objects.count())
+        entitlements.enforce_limit(self.request.user.shop, "products", Product.objects.count())
         serializer.save()
 
     def perform_update(self, serializer):
@@ -422,9 +427,9 @@ class MedicineViewSet(viewsets.ModelViewSet):
 
     @action(detail=False, methods=["get"], url_path="low-stock")
     def low_stock(self, request):
-        qs = _stock_annotated(Medicine.objects.filter(is_visible=True))
+        qs = _stock_annotated(Product.objects.filter(is_visible=True))
         items = [m for m in qs if (m.stock_qty or 0) <= m.reorder_level]
-        return Response(MedicineAutocompleteSerializer(items, many=True, context={"request": request}).data)
+        return Response(ProductAutocompleteSerializer(items, many=True, context={"request": request}).data)
 
     @action(detail=False, methods=["get"])
     def autocomplete(self, request):
@@ -435,7 +440,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
         """
         q = (request.query_params.get("q") or "").strip()
         include_hidden = request.query_params.get("include_hidden") in ("1", "true", "True")
-        qs = Medicine.objects.all()
+        qs = Product.objects.all()
         if not (include_hidden and request.user.role in MEDICINE_EDIT_ROLES):
             qs = qs.filter(is_visible=True)
         if q:
@@ -444,62 +449,63 @@ class MedicineViewSet(viewsets.ModelViewSet):
         qs = _stock_annotated(qs).order_by("name")
         if q:
             qs = qs[:30]
-        return Response(MedicineAutocompleteSerializer(qs, many=True, context={"request": request}).data)
+        return Response(ProductAutocompleteSerializer(qs, many=True, context={"request": request}).data)
 
     @action(detail=False, methods=["post"], url_path="quick-add")
     @transaction.atomic
     def quick_add(self, request):
-        entitlements.enforce_limit(request.user.shop, "products", Medicine.objects.count())
-        s = QuickAddMedicineSerializer(data=request.data)
+        entitlements.enforce_limit(request.user.shop, "products", Product.objects.count())
+        s = QuickAddProductSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         d = s.validated_data
-        medicine = Medicine.objects.create(
+        product = Product.objects.create(
             name=d["name"], generic_name=d["generic_name"], category=d["category"],
             unit=d["unit"], unit_price=d["unit_price"], insurance_price=d["insurance_price"],
             reorder_level=d["reorder_level"],
             barcode=d["barcode"], sku=d["sku"], image=d.get("image"),
         )
         batch_no = d["batch_number"] or f"B-{timezone.now():%Y%m%d%H%M%S}"
-        batch = MedicineBatch.objects.create(
-            medicine=medicine, batch_number=batch_no,
+        batch = ProductBatch.objects.create(
+            product=product, batch_number=batch_no,
             quantity_received=d["quantity"], quantity_remaining=d["quantity"],
             expiry_date=d.get("expiry_date"),
         )
-        _log(medicine, batch, StockTransactionType.STOCK_IN, d["quantity"], "Quick add", request.user)
-        medicine = _stock_annotated(Medicine.objects.filter(pk=medicine.pk)).get()
-        return Response(MedicineAutocompleteSerializer(medicine, context={"request": request}).data,
+        _log(product, batch, StockTransactionType.STOCK_IN, d["quantity"], "Quick add", request.user)
+        product = _stock_annotated(Product.objects.filter(pk=product.pk)).get()
+        return Response(ProductAutocompleteSerializer(product, context={"request": request}).data,
                         status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="branch-stock")
     def branch_stock(self, request, pk=None):
         """Per-batch breakdown (kept under the old name so the frontend call is unchanged).
         `quantity` is what the edit modal reads; `total` is kept for older callers."""
-        medicine = self.get_object()
-        batches = list(_fefo(medicine.batches.filter(quantity_remaining__gt=0)))
+        product = self.get_object()
+        batches = list(_fefo(product.batches.filter(quantity_remaining__gt=0)))
         total = sum(b.quantity_remaining for b in batches)
         return Response({
-            "medicine": medicine.id,
+            "medicine": product.id,
+            "product": product.id,
             "quantity": total,
             "total": total,
-            "batches": MedicineBatchSerializer(batches, many=True).data,
+            "batches": ProductBatchSerializer(batches, many=True).data,
         })
 
     @action(detail=True, methods=["post"], url_path="set-stock")
     @transaction.atomic
     def set_stock(self, request, pk=None):
         """Stock-take: force on-hand to an exact number via ADJUSTMENT rows (FEFO removal)."""
-        medicine = self.get_object()
-        s = SetMedicineStockSerializer(data=request.data)
+        product = self.get_object()
+        s = SetProductStockSerializer(data=request.data)
         s.is_valid(raise_exception=True)
         target, reason = s.validated_data["quantity"], s.validated_data["reason"]
 
-        batches = list(_fefo(medicine.batches.select_for_update().filter(quantity_remaining__gt=0)))
+        batches = list(_fefo(product.batches.select_for_update().filter(quantity_remaining__gt=0)))
         current = sum(b.quantity_remaining for b in batches)
         diff = target - current
 
         if diff > 0:
-            batch = batches[-1] if batches else MedicineBatch.objects.create(
-                medicine=medicine, batch_number=f"ADJ-{timezone.now():%Y%m%d%H%M%S}",
+            batch = batches[-1] if batches else ProductBatch.objects.create(
+                product=product, batch_number=f"ADJ-{timezone.now():%Y%m%d%H%M%S}",
                 quantity_received=0, quantity_remaining=0,
                 expiry_date=(timezone.now().date() + timedelta(days=365))
                 if ShopSettings.load().tracks_expiry else None,
@@ -507,7 +513,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
             batch.quantity_remaining += diff
             batch.quantity_received += diff
             batch.save(update_fields=["quantity_remaining", "quantity_received", "updated_at"])
-            _log(medicine, batch, StockTransactionType.ADJUSTMENT, diff, reason, request.user)
+            _log(product, batch, StockTransactionType.ADJUSTMENT, diff, reason, request.user)
         elif diff < 0:
             to_remove = -diff
             for b in batches:  # earliest expiry first
@@ -516,21 +522,23 @@ class MedicineViewSet(viewsets.ModelViewSet):
                 take = min(b.quantity_remaining, to_remove)
                 b.quantity_remaining -= take
                 b.save(update_fields=["quantity_remaining", "updated_at"])
-                _log(medicine, b, StockTransactionType.ADJUSTMENT, -take, reason, request.user)
+                _log(product, b, StockTransactionType.ADJUSTMENT, -take, reason, request.user)
                 to_remove -= take
 
-        medicine = _stock_annotated(Medicine.objects.filter(pk=medicine.pk)).get()
-        data = MedicineAutocompleteSerializer(medicine, context={"request": request}).data
-        return Response({**data, "medicine": data})  # the edit modal reads r.medicine
+        product = _stock_annotated(Product.objects.filter(pk=product.pk)).get()
+        data = ProductAutocompleteSerializer(product, context={"request": request}).data
+        # The edit modal reads r.medicine; r.product is the generic name for the same thing.
+        return Response({**data, "medicine": data, "product": data})
 
 
-class MedicineBatchViewSet(viewsets.ModelViewSet):
-    serializer_class = MedicineBatchSerializer
+class ProductBatchViewSet(viewsets.ModelViewSet):
+    serializer_class = ProductBatchSerializer
 
     def get_queryset(self):
-        qs = _fefo(MedicineBatch.objects.select_related("medicine", "supplier"))
-        if self.request.query_params.get("medicine"):
-            qs = qs.filter(medicine_id=self.request.query_params["medicine"])
+        qs = _fefo(ProductBatch.objects.select_related("product", "supplier"))
+        pid = _product_param(self.request.query_params)
+        if pid:
+            qs = qs.filter(product_id=pid)
         return qs
 
     def get_permissions(self):
@@ -542,7 +550,7 @@ class MedicineBatchViewSet(viewsets.ModelViewSet):
     def perform_create(self, serializer):
         qty = serializer.validated_data["quantity_received"]
         batch = serializer.save(quantity_remaining=qty)
-        _log(batch.medicine, batch, StockTransactionType.STOCK_IN, qty, "Stock received", self.request.user)
+        _log(batch.product, batch, StockTransactionType.STOCK_IN, qty, "Stock received", self.request.user)
 
     def perform_destroy(self, instance):
         instance.soft_delete()
@@ -553,7 +561,7 @@ class MedicineBatchViewSet(viewsets.ModelViewSet):
         cutoff = timezone.now().date() + timedelta(days=days)
         # Batches without an expiry date never match `expiry_date__lte`, so they are skipped.
         qs = self.get_queryset().filter(quantity_remaining__gt=0, expiry_date__lte=cutoff)
-        return Response(MedicineBatchSerializer(qs, many=True).data)
+        return Response(ProductBatchSerializer(qs, many=True).data)
 
 
 class StockTransactionViewSet(viewsets.ReadOnlyModelViewSet):
@@ -561,10 +569,11 @@ class StockTransactionViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [CanManageStock]
 
     def get_queryset(self):
-        qs = StockTransaction.objects.select_related("medicine", "batch", "performed_by")
+        qs = StockTransaction.objects.select_related("product", "batch", "performed_by")
         p = self.request.query_params
-        if p.get("medicine"):
-            qs = qs.filter(medicine_id=p["medicine"])
+        pid = _product_param(p)
+        if pid:
+            qs = qs.filter(product_id=pid)
         if p.get("transaction_type"):
             qs = qs.filter(transaction_type=p["transaction_type"])
         return qs
@@ -574,7 +583,8 @@ class StockTransactionViewSet(viewsets.ReadOnlyModelViewSet):
 # Sales (POS)
 # ---------------------------------------------------------------------------
 def otc_sale_snapshot(sale):
-    """JSON-safe picture of a sale, stored before/after an amendment."""
+    """JSON-safe picture of a sale, stored before/after an amendment.
+    Item keys stay `medicine` / `medicine_name` so the amendment history screen keeps working."""
     return {
         "customer_name": sale.customer_name,
         "customer_phone": sale.customer_phone,
@@ -585,9 +595,9 @@ def otc_sale_snapshot(sale):
         "total_amount": str(sale.total_amount),
         "amount_paid": str(sale.amount_paid),
         "items": [
-            {"medicine": str(i.medicine_id), "medicine_name": i.medicine.name,
+            {"medicine": str(i.product_id), "medicine_name": i.product.name,
              "quantity": i.quantity, "unit_price": str(i.unit_price), "subtotal": str(i.subtotal)}
-            for i in sale.items.select_related("medicine")
+            for i in sale.items.select_related("product")
         ],
     }
 
@@ -598,7 +608,7 @@ class OTCSaleViewSet(viewsets.ReadOnlyModelViewSet):
 
     def get_queryset(self):
         qs = (OTCSale.objects.select_related("served_by")
-              .prefetch_related("items__medicine", "items__batch").order_by("-sold_at"))
+              .prefetch_related("items__product", "items__batch").order_by("-sold_at"))
         u = self.request.user
         if u.role == Role.CASHIER:
             qs = qs.filter(served_by=u)  # cashiers only see their own
@@ -623,10 +633,10 @@ class OTCSaleViewSet(viewsets.ReadOnlyModelViewSet):
 
     # -- helpers ------------------------------------------------------------
     @staticmethod
-    def _price_line(medicine, quantity, line_amount):
+    def _price_line(product, quantity, line_amount):
         """Returns (unit_price, line_total). A cashier-entered line_amount wins."""
         if line_amount is None:
-            unit_price = medicine.unit_price
+            unit_price = product.unit_price
             return unit_price, unit_price * quantity
         return (line_amount / quantity).quantize(Decimal("0.01")), line_amount
 
@@ -634,19 +644,19 @@ class OTCSaleViewSet(viewsets.ReadOnlyModelViewSet):
         """FEFO batch pick (no-expiry batches oldest first) + deduct + ledger. Returns the subtotal."""
         subtotal = Decimal("0")
         for it in items:
-            medicine, qty = it["medicine"], it["quantity"]
-            batch = _fefo(MedicineBatch.objects.select_for_update()
-                          .filter(medicine=medicine, quantity_remaining__gte=qty)).first()
+            product, qty = it["product"], it["quantity"]
+            batch = _fefo(ProductBatch.objects.select_for_update()
+                          .filter(product=product, quantity_remaining__gte=qty)).first()
             if not batch:
-                raise OutOfStockError(f"Insufficient stock for {medicine.name}.")
-            unit_price, line_total = self._price_line(medicine, qty, it.get("line_amount"))
+                raise OutOfStockError(f"Insufficient stock for {product.name}.")
+            unit_price, line_total = self._price_line(product, qty, it.get("line_amount"))
             OTCSaleItem.objects.create(
-                sale=sale, medicine=medicine, batch=batch, quantity=qty,
+                sale=sale, product=product, batch=batch, quantity=qty,
                 unit_price=unit_price, subtotal=line_total,
             )
             batch.quantity_remaining -= qty
             batch.save(update_fields=["quantity_remaining", "updated_at"])
-            _log(medicine, batch, StockTransactionType.STOCK_OUT, qty,
+            _log(product, batch, StockTransactionType.STOCK_OUT, qty,
                  f"OTC sale {sale.sale_number}", user)
             subtotal += line_total
         return subtotal
@@ -730,12 +740,12 @@ class OTCSaleViewSet(viewsets.ReadOnlyModelViewSet):
         before = otc_sale_snapshot(sale)
 
         # 1) put the old stock back
-        for old in sale.items.select_related("medicine", "batch"):
+        for old in sale.items.select_related("product", "batch"):
             if old.batch_id:
-                batch = MedicineBatch.objects.select_for_update().get(pk=old.batch_id)
+                batch = ProductBatch.objects.select_for_update().get(pk=old.batch_id)
                 batch.quantity_remaining += old.quantity
                 batch.save(update_fields=["quantity_remaining", "updated_at"])
-                _log(old.medicine, batch, StockTransactionType.ADJUSTMENT, old.quantity,
+                _log(old.product, batch, StockTransactionType.ADJUSTMENT, old.quantity,
                      f"Amend {sale.sale_number}: restore", u)
         sale.items.all().delete()
 
@@ -757,6 +767,7 @@ class OTCSaleViewSet(viewsets.ReadOnlyModelViewSet):
 
 # ---------------------------------------------------------------------------
 # Dashboard / reports
+# (response keys `top_medicines` / `medicines` are kept; `top_products` / `products` are added)
 # ---------------------------------------------------------------------------
 @api_view(["GET"])
 @permission_classes([CanViewReports])
@@ -797,29 +808,30 @@ def reports_summary(request):
         for r in sales.values("served_by__username").annotate(count=Count("id"), revenue=Sum("total_amount"))
         .order_by("-revenue")
     ]
-    top_medicines = [
-        {"name": r["medicine__name"], "quantity": r["qty"], "revenue": money(r["revenue"])}
-        for r in OTCSaleItem.objects.filter(sale__in=sales).values("medicine__name")
+    top_products = [
+        {"name": r["product__name"], "quantity": r["qty"], "revenue": money(r["revenue"])}
+        for r in OTCSaleItem.objects.filter(sale__in=sales).values("product__name")
         .annotate(qty=Sum("quantity"), revenue=Sum("subtotal")).order_by("-revenue")[:8]
     ]
 
     # Stock health (shop-wide, not date filtered)
-    meds = list(_stock_annotated(Medicine.objects.filter(is_visible=True)))
-    live = MedicineBatch.objects.filter(quantity_remaining__gt=0)
+    products = list(_stock_annotated(Product.objects.filter(is_visible=True)))
+    live = ProductBatch.objects.filter(quantity_remaining__gt=0)
     stock_value = live.aggregate(v=Sum(ExpressionWrapper(
-        F("quantity_remaining") * F("medicine__unit_price"), output_field=DecimalField())))["v"]
+        F("quantity_remaining") * F("product__unit_price"), output_field=DecimalField())))["v"]
     # Batches with no expiry date never match the expiry filters below.
     stock = {
-        "medicines": len(meds),
-        "low_stock": sum(1 for m in meds if 0 < (m.stock_qty or 0) <= m.reorder_level),
-        "out_of_stock": sum(1 for m in meds if (m.stock_qty or 0) == 0),
+        "medicines": len(products),
+        "products": len(products),
+        "low_stock": sum(1 for m in products if 0 < (m.stock_qty or 0) <= m.reorder_level),
+        "out_of_stock": sum(1 for m in products if (m.stock_qty or 0) == 0),
         "expiring_90_days": live.filter(expiry_date__gte=today, expiry_date__lte=today + timedelta(days=90)).count(),
         "expired": live.filter(expiry_date__lt=today).count(),
         "stock_value": money(stock_value),
     }
 
     recent = OTCSaleSerializer(
-        sales.select_related("served_by").prefetch_related("items__medicine").order_by("-sold_at")[:8],
+        sales.select_related("served_by").prefetch_related("items__product").order_by("-sold_at")[:8],
         many=True, context={"request": request},
     ).data
 
@@ -831,7 +843,8 @@ def reports_summary(request):
             "outstanding": money(agg["outstanding"]),
         },
         "by_day": by_day, "by_method": by_method, "by_cashier": by_cashier,
-        "top_medicines": top_medicines, "stock": stock, "recent_sales": recent,
+        "top_medicines": top_products, "top_products": top_products,
+        "stock": stock, "recent_sales": recent,
     })
 
 
@@ -890,10 +903,11 @@ def _by_method(qs):
 
 def _top_items(sale_qs, limit=10):
     rows = (OTCSaleItem.objects.filter(sale__in=sale_qs)
-            .values("medicine_id", "medicine__name", "medicine__unit")
+            .values("product_id", "product__name", "product__unit")
             .annotate(quantity=Sum("quantity"), revenue=Sum("subtotal"))
             .order_by("-revenue")[:limit])
-    return [{"medicine": str(r["medicine_id"]), "name": r["medicine__name"], "unit": r["medicine__unit"],
+    return [{"medicine": str(r["product_id"]), "product": str(r["product_id"]),
+             "name": r["product__name"], "unit": r["product__unit"],
              "quantity": r["quantity"], "revenue": _money(r["revenue"])} for r in rows]
 
 
@@ -915,29 +929,31 @@ def dashboard_summary(request):
     )["v"]
 
     settings_row = ShopSettings.load()
-    meds = list(_stock_annotated(Medicine.objects.filter(is_visible=True)))
-    low = [m for m in meds if (m.stock_qty or 0) <= m.reorder_level]
+    products = list(_stock_annotated(Product.objects.filter(is_visible=True)))
+    low = [m for m in products if (m.stock_qty or 0) <= m.reorder_level]
     cutoff = today + timedelta(days=settings_row.expiry_alert_days)
     # Shops that do not track expiry never get expiry alerts.
     expiring = (
-        MedicineBatch.objects.filter(quantity_remaining__gt=0, expiry_date__lte=cutoff).count()
+        ProductBatch.objects.filter(quantity_remaining__gt=0, expiry_date__lte=cutoff).count()
         if settings_row.tracks_expiry else 0
     )
 
-    recent = (scope.select_related("served_by").prefetch_related("items__medicine")
+    recent = (scope.select_related("served_by").prefetch_related("items__product")
               .order_by("-sold_at")[:8])
+    top = _top_items(range_qs, 6)
     return Response({
         "today": {"revenue": _money(today_agg["revenue"]), "sales": today_agg["sales"] or 0,
                   "items_sold": items_today},
         "outstanding": _money(outstanding),
         "low_stock_count": len(low),
-        "out_of_stock_count": sum(1 for m in meds if (m.stock_qty or 0) == 0),
+        "out_of_stock_count": sum(1 for m in products if (m.stock_qty or 0) == 0),
         "expiring_count": expiring,
         "trend": _daily_series(range_qs, d_from, today),
         "payment_methods": _by_method(range_qs),
-        "top_medicines": _top_items(range_qs, 6),
+        "top_medicines": top,
+        "top_products": top,
         "recent_sales": OTCSaleSerializer(recent, many=True, context={"request": request}).data,
-        "low_stock": MedicineAutocompleteSerializer(
+        "low_stock": ProductAutocompleteSerializer(
             sorted(low, key=lambda m: (m.stock_qty or 0))[:8], many=True,
             context={"request": request}).data,
     })
@@ -986,9 +1002,9 @@ def stock_report(request):
     """Stock on hand valued at selling price, plus low / out-of-stock and expiring batches."""
     entitlements.require_feature(request.user.shop, "full_reports")
     cfg = ShopSettings.load()
-    meds = list(_stock_annotated(Medicine.objects.filter(is_visible=True)).order_by("name"))
+    products = list(_stock_annotated(Product.objects.filter(is_visible=True)).order_by("name"))
     rows, value = [], Decimal("0")
-    for m in meds:
+    for m in products:
         qty = m.stock_qty or 0
         v = m.unit_price * qty
         value += v
@@ -999,7 +1015,7 @@ def stock_report(request):
     today = timezone.localdate()
     cutoff = today + timedelta(days=cfg.expiry_alert_days)
     if cfg.tracks_expiry:
-        batches = (MedicineBatch.objects.select_related("medicine")
+        batches = (ProductBatch.objects.select_related("product")
                    .filter(quantity_remaining__gt=0, expiry_date__lte=cutoff).order_by("expiry_date"))
     else:
         batches = []
@@ -1009,7 +1025,8 @@ def stock_report(request):
         "low_count": sum(1 for r in rows if r["status"] == "LOW"),
         "out_count": sum(1 for r in rows if r["status"] == "OUT"),
         "items": rows,
-        "expiring": [{"id": str(b.id), "medicine": b.medicine.name, "batch_number": b.batch_number,
+        "expiring": [{"id": str(b.id), "medicine": b.product.name, "product": b.product.name,
+                      "batch_number": b.batch_number,
                       "quantity_remaining": b.quantity_remaining, "expiry_date": b.expiry_date.isoformat(),
                       "days_left": (b.expiry_date - today).days} for b in batches],
     })
@@ -1124,6 +1141,9 @@ def subscription_view(request):
         # --- new keys ---
         "wallet_balance": str(shop.wallet_balance),
         "sales_remaining": None if ent.sales_unlimited else ent.sales_remaining,
+        # Total credits of the limited bundles still running (the % shown by the low-sales alert).
+        "sales_total": None if ent.sales_unlimited else sum(
+            p.sales_allowance_total or 0 for p in active if p.sales_allowance_total is not None),
         "limits": {"max_users": ent.max_users, "max_products": ent.max_products},
         "features": sorted(ent.features),
         "bundles": [
@@ -1646,3 +1666,10 @@ def chat_users(request):
     if s:
         qs = qs.filter(Q(username__icontains=s) | Q(first_name__icontains=s) | Q(last_name__icontains=s))
     return Response([_user_brief(u) for u in qs])
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible names for any module still importing the old ones.
+# ---------------------------------------------------------------------------
+MedicineViewSet = ProductViewSet
+MedicineBatchViewSet = ProductBatchViewSet

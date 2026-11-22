@@ -2149,7 +2149,7 @@ export default function WalkInSale() {
           <h1 className="page-title">Walk-in Sale / POS</h1>
           <p className="page-subtitle">
             {profile.isPharmacy
-              ? "Sell products directly over the counter — no patient record required"
+              ? "Sell products directly over the counter "
               : `Ring up walk-in sales fast — scan a barcode or tap a product to add it`}
           </p>
         </div>

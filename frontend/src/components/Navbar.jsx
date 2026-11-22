@@ -8,6 +8,7 @@ import { ROLES, ROLE_LABELS } from "../utils/roles";
 import ChatDropdown from "./ChatDropdown.jsx";
 import NotificationBell from "./NotificationBell.jsx";
 import PageSearch from "./PageSearch.jsx";
+import SubscriptionBattery from "./SubscriptionBattery.jsx";
 import useFullscreen from "../hooks/useFullscreen.js";
 import { useUnreadCounts } from "../utils/unreadCounts.js";
 
@@ -114,6 +115,9 @@ export default function Navbar({ onToggleSidebar }) {
         <PageSearch />
 
         <div className="navbar__right">
+          {/* Battery: % of sales left (or days left on an unlimited bundle) */}
+          <SubscriptionBattery />
+
           {/* Chat icon with unread message count */}
           <ChatDropdown />
 

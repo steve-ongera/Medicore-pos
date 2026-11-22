@@ -1,18 +1,6 @@
 # api/models.py
 #
-# Medicore POS: multi-business point-of-sale models (multi-tenant SaaS, single `api` app).
-# Serves pharmacies, supermarkets, mini-marts, general retail, hardware, electronics, boutiques...
-#
-# NOTE: the model names (Medicine, MedicineBatch, ...) are kept so the frontend, URLs and
-# migrations keep working. "Medicine" is simply the generic *product* model.
-#
-# Sections:
-#   1. Abstract base      - UUID pk, timestamps, soft delete
-#   2. Accounts           - Role, User
-#   3. Stock              - Supplier, Medicine (product), MedicineBatch, StockTransaction
-#   4. Sales (POS)        - OTCSale, OTCSaleItem, OTCSaleAmendment
-#   5. Shop settings, legacy Subscription, SubscriptionRequest, Notification, chat
-#   6. SaaS               - Shop, Bundle, BundlePurchase, WalletTransaction, MpesaPayment
+# Multi-business point-of-sale models (multi-tenant SaaS, single `api` app).
 
 import uuid
 from datetime import timedelta
@@ -57,12 +45,12 @@ class BaseModel(models.Model):
         self.save(update_fields=["is_deleted", "deleted_at"])
 
 
-
 # ---------------------------------------------------------------------------
 # 2. Accounts
 # ---------------------------------------------------------------------------
 class Role(models.TextChoices):
-    # Same role names as the HMIS so utils/roles.js and the sidebar keep working.
+    # Same role names as before so utils/roles.js and the sidebar keep working.
+    # PHARMACIST is the "Store Manager" role for every business type.
     SUPER_ADMIN = "SUPER_ADMIN", "Super Admin / Owner"
     PHARMACIST = "PHARMACIST", "Pharmacist / Store Manager"
     CASHIER = "CASHIER", "Cashier"
@@ -101,7 +89,7 @@ class PasswordResetCode(models.Model):
         db_table = "password_reset_codes"
         ordering = ["-created_at"]
 
-        
+
 class PaymentMethod(models.TextChoices):
     CASH = "CASH", "Cash"
     MPESA = "MPESA", "M-Pesa"
@@ -124,26 +112,28 @@ class Supplier(BaseModel):
         return self.name
 
 
-class Medicine(BaseModel):
+class Product(BaseModel):
     """A product in the catalog (medicine, grocery item, any retail item).
     Stock is derived from its batches."""
 
     name = models.CharField(max_length=150)
+    # Secondary name: generic name for medicines, brand / alternative name for other goods.
+    # (Field name kept so the API payload and the frontend do not change.)
     generic_name = models.CharField(max_length=150, blank=True)
     category = models.CharField(max_length=100, blank=True)
-    unit = models.CharField(max_length=30, default="tablet")  # tablet, syrup, piece, pack, bottle...
+    unit = models.CharField(max_length=30, default="piece")  # piece, pack, bottle, kg, tablet, syrup...
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     insurance_price = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     reorder_level = models.PositiveIntegerField(default=20)
     barcode = models.CharField(max_length=64, blank=True, db_index=True)
     sku = models.CharField(max_length=60, blank=True)
-    image = models.ImageField(upload_to="products/", null=True, blank=True)  # NEW
+    image = models.ImageField(upload_to="products/", null=True, blank=True)
     is_visible = models.BooleanField(
         default=True, help_text="When False, hidden from the POS grid and pickers (editors can still un-hide it)."
     )
 
     class Meta:
-        db_table = "medicines"
+        db_table = "products"
         verbose_name = "product"
         verbose_name_plural = "products"
 
@@ -159,8 +149,8 @@ class Medicine(BaseModel):
         return self.name
 
 
-class MedicineBatch(BaseModel):
-    medicine = models.ForeignKey(Medicine, on_delete=models.CASCADE, related_name="batches")
+class ProductBatch(BaseModel):
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="batches")
     supplier = models.ForeignKey(Supplier, null=True, blank=True, on_delete=models.SET_NULL, related_name="batches")
     batch_number = models.CharField(max_length=60)
     quantity_received = models.PositiveIntegerField()
@@ -170,11 +160,16 @@ class MedicineBatch(BaseModel):
     received_date = models.DateField(auto_now_add=True)
 
     class Meta:
-        db_table = "medicine_batches"
-        unique_together = ("medicine", "batch_number")
+        db_table = "product_batches"
+        unique_together = ("product", "batch_number")
 
     def __str__(self):
-        return f"{self.medicine.name} - {self.batch_number}"
+        return f"{self.product.name} - {self.batch_number}"
+
+
+# Backwards-compatible names (plain aliases, not new models).
+Medicine = Product
+MedicineBatch = ProductBatch
 
 
 class StockTransactionType(models.TextChoices):
@@ -187,8 +182,8 @@ class StockTransactionType(models.TextChoices):
 class StockTransaction(BaseModel):
     """Ledger entry for every stock movement."""
 
-    medicine = models.ForeignKey(Medicine, on_delete=models.CASCADE, related_name="stock_transactions")
-    batch = models.ForeignKey(MedicineBatch, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_transactions")
+    product = models.ForeignKey(Product, on_delete=models.CASCADE, related_name="stock_transactions")
+    batch = models.ForeignKey(ProductBatch, null=True, blank=True, on_delete=models.SET_NULL, related_name="stock_transactions")
     transaction_type = models.CharField(max_length=20, choices=StockTransactionType.choices)
     quantity = models.IntegerField()
     reason = models.CharField(max_length=255, blank=True)
@@ -242,8 +237,8 @@ class OTCSale(BaseModel):
 
 class OTCSaleItem(BaseModel):
     sale = models.ForeignKey(OTCSale, on_delete=models.CASCADE, related_name="items")
-    medicine = models.ForeignKey(Medicine, on_delete=models.PROTECT, related_name="otc_sale_items")
-    batch = models.ForeignKey(MedicineBatch, null=True, on_delete=models.SET_NULL, related_name="otc_sale_items")
+    product = models.ForeignKey(Product, on_delete=models.PROTECT, related_name="otc_sale_items")
+    batch = models.ForeignKey(ProductBatch, null=True, on_delete=models.SET_NULL, related_name="otc_sale_items")
     quantity = models.PositiveIntegerField()
     unit_price = models.DecimalField(max_digits=10, decimal_places=2)
     subtotal = models.DecimalField(max_digits=10, decimal_places=2, editable=False)
@@ -258,7 +253,7 @@ class OTCSaleItem(BaseModel):
         super().save(*args, **kwargs)
 
     def __str__(self):
-        return f"{self.medicine.name} x{self.quantity}"
+        return f"{self.product.name} x{self.quantity}"
 
 
 class OTCSaleAmendment(BaseModel):
@@ -501,7 +496,7 @@ class Bundle(models.Model):
     validity_days = models.PositiveIntegerField(default=30)
     sales_allowance = models.PositiveIntegerField(null=True, blank=True, help_text="Sales credits; blank = unlimited")
     max_users = models.PositiveIntegerField(null=True, blank=True, help_text="Staff accounts; blank = unlimited")
-    max_products = models.PositiveIntegerField(null=True, blank=True, help_text="Medicines; blank = unlimited")
+    max_products = models.PositiveIntegerField(null=True, blank=True, help_text="Products; blank = unlimited")
     features = models.JSONField(default=list, blank=True, help_text='e.g. ["full_reports"]')
     is_trial = models.BooleanField(default=False)
     is_active = models.BooleanField(default=True)

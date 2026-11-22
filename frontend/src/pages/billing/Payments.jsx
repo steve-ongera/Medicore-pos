@@ -3,18 +3,237 @@
 // design-system buttons, inputs, badges and data-table.
 // Receipts: every sale can be viewed, downloaded (PDF) and printed, using the exact same
 // receipt as the Walk-in Sale screen.
+// Export: the payments list is exported as a PDF that uses the same look as the receipt
+// (shop header, navy rule, navy table headers, grey label cells, footer).
+// The payment summary is printed AFTER the transactions table.
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
+import jsPDF from "jspdf";
+import autoTable from "jspdf-autotable";
 import { toast } from "../../context/ToastContext";
 import {
-  DateRange, METHOD_LABEL, Modal, downloadCSV, isoDate, useFetch,
+  DateRange, METHOD_LABEL, Modal, isoDate, useFetch,
 } from "../../components/PageKit";
 import { addOTCSalePayment, getOTCSales, getPaymentsSummary } from "../../services/api";
 import { formatCurrency, formatDateTime } from "../../utils/formatters";
-import { useShopProfile } from "../../utils/shopProfile";
+import { useShopProfile, loadShopProfile } from "../../utils/shopProfile";
 import {
   ReceiptModal, WalkInSaleStyles, resolveReceiptQr, downloadReceiptPdf, printReceiptPdf,
 } from "./WalkInSale";
+
+// ---------------------------------------------------------------------------
+// PDF REPORT (same visual format as the Walk-in Sale receipt)
+// ---------------------------------------------------------------------------
+const RC_NAVY = [31, 56, 100];
+const RC_GREY = [242, 242, 242];
+const RC_BORDER = [166, 166, 166];
+const RC_BLACK = [0, 0, 0];
+const POWERED_BY = "Powered by Cloud 360 (www.Cloud 360.com)"; // "" to hide
+
+const money = (v) =>
+  Number(v || 0).toLocaleString("en-KE", { minimumFractionDigits: 0, maximumFractionDigits: 2 });
+
+// Same header lines the receipt uses, built from the shop profile.
+const reportHeader = (profile) => {
+  const s = profile?.settings || {};
+  const name = s.name || profile?.shopName || "My Shop";
+  const contact = [s.phone && `Tel: ${s.phone}`, s.email && `Email: ${s.email}`]
+    .filter(Boolean)
+    .join("  |  ");
+  return {
+    name: name.toUpperCase(),
+    footerName: name,
+    subtitle: s.kra_pin ? `KRA PIN: ${s.kra_pin}` : "",
+    addressLine1: s.address || "",
+    addressLine2: contact,
+    poweredBy: POWERED_BY,
+  };
+};
+
+function buildPaymentsPdf({ rows, summary, range, method, search, unpaid, profile }) {
+  const hdr = reportHeader(profile);
+  const cur = profile?.currency || "KES";
+  const doc = new jsPDF({ orientation: "landscape", unit: "mm", format: "a4" });
+  const pageWidth = doc.internal.pageSize.getWidth(); // 297
+  const pageHeight = doc.internal.pageSize.getHeight(); // 210
+  const marginX = 10;
+  const year = new Date().getFullYear();
+
+  // --- Header (centred shop details, navy rule) ---
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(hdr.name.length > 32 ? 12 : 15);
+  doc.setTextColor(...RC_NAVY);
+  doc.text(hdr.name, pageWidth / 2, 11, { align: "center" });
+
+  if (hdr.subtitle) {
+    doc.setFontSize(8);
+    doc.text(hdr.subtitle, pageWidth / 2, 15.5, { align: "center" });
+  }
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(7);
+  doc.setTextColor(...RC_BLACK);
+  if (hdr.addressLine1) doc.text(hdr.addressLine1, pageWidth / 2, 19, { align: "center" });
+  if (hdr.addressLine2) doc.text(hdr.addressLine2, pageWidth / 2, 22.5, { align: "center" });
+
+  doc.setDrawColor(...RC_NAVY);
+  doc.setLineWidth(0.6);
+  doc.line(marginX, 26.8, pageWidth - marginX, 26.8);
+
+  // --- Title row (generated date on the right) ---
+  doc.setFont("helvetica", "bold");
+  doc.setFontSize(10.5);
+  doc.setTextColor(...RC_NAVY);
+  doc.text("PAYMENTS REPORT", pageWidth / 2, 32, { align: "center" });
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(6);
+  doc.setTextColor(110, 110, 110);
+  doc.text(
+    `Generated ${new Date().toLocaleDateString("en-KE", { year: "numeric", month: "long", day: "numeric" })}`,
+    pageWidth - marginX, 32, { align: "right" }
+  );
+
+  // --- Period + filters ---
+  const filters = [
+    method ? `Method: ${METHOD_LABEL[method] || method}` : "Method: All",
+    unpaid ? "Unpaid only" : null,
+    search ? `Search: "${search}"` : null,
+  ].filter(Boolean).join("   |   ");
+
+  doc.setFont("helvetica", "normal");
+  doc.setFontSize(8);
+  doc.setTextColor(...RC_BLACK);
+  doc.text(`Period: ${range.from} to ${range.to}`, marginX, 37.5);
+  doc.text(filters, pageWidth - marginX, 37.5, { align: "right" });
+
+  // --- Transactions table (first) ---
+  const totalAll = rows.reduce((a, r) => a + Number(r.total_amount || 0), 0);
+  const paidAll = rows.reduce((a, r) => a + Number(r.amount_paid || 0), 0);
+  const owedAll = rows.reduce((a, r) => a + Math.max(Number(r.balance || 0), 0), 0);
+
+  autoTable(doc, {
+    startY: 41,
+    margin: { left: marginX, right: marginX, top: 14, bottom: 18 },
+    head: [["No", "Sale", "Date", "Customer", "Method", "Reference", "Total", "Paid", "Balance", "Served By"]],
+    body: rows.map((r, i) => [
+      String(i + 1),
+      r.sale_number,
+      r.sold_at ? new Date(r.sold_at).toLocaleString("en-KE") : "-",
+      r.customer_name || "Walk-in",
+      METHOD_LABEL[r.payment_method] || r.payment_method || "-",
+      r.reference_number || "-",
+      money(r.total_amount),
+      money(r.amount_paid),
+      Number(r.balance) > 0 ? money(r.balance) : "Paid",
+      r.served_by_name || "-",
+    ]),
+    foot: [["", "", "", "", "", "TOTAL", money(totalAll), money(paidAll), money(owedAll), ""]],
+    showFoot: "lastPage",
+    theme: "grid",
+    styles: {
+      font: "helvetica", fontSize: 7, cellPadding: 1.1, overflow: "ellipsize",
+      textColor: RC_BLACK, lineColor: [191, 191, 191], lineWidth: 0.2,
+    },
+    headStyles: { fillColor: RC_NAVY, textColor: [255, 255, 255], fontStyle: "bold", lineColor: RC_NAVY },
+    footStyles: { fillColor: RC_GREY, textColor: RC_BLACK, fontStyle: "bold", lineColor: RC_BORDER },
+    alternateRowStyles: { fillColor: RC_GREY },
+    columnStyles: {
+      0: { cellWidth: 9, halign: "center" },
+      1: { cellWidth: 28 },
+      2: { cellWidth: 36 },
+      3: { cellWidth: "auto" },
+      4: { cellWidth: 20 },
+      5: { cellWidth: 28 },
+      6: { cellWidth: 24, halign: "right" },
+      7: { cellWidth: 24, halign: "right" },
+      8: { cellWidth: 22, halign: "right" },
+      9: { cellWidth: 30 },
+    },
+    didParseCell: (data) => {
+      if (data.section === "body" && data.column.index === 8 && data.cell.raw !== "Paid") {
+        data.cell.styles.textColor = [185, 28, 28];
+        data.cell.styles.fontStyle = "bold";
+      }
+      if (data.section === "foot" && data.column.index >= 5) {
+        data.cell.styles.halign = "right";
+      }
+    },
+  });
+
+  // --- Payment summary (AFTER the transactions table) ---
+  if (summary) {
+    const summaryRows = [
+      ["Sales", String(summary.sales ?? rows.length)],
+      ["Billed", `${cur} ${money(summary.billed)}`],
+      ["Collected", `${cur} ${money(summary.collected)}`],
+      ["Outstanding", `${cur} ${money(summary.outstanding)}`],
+      ...(summary.by_method || []).map((m) => [
+        `${METHOD_LABEL[m.method] || m.method} (${m.count})`,
+        `${cur} ${money(m.total)}`,
+      ]),
+    ];
+
+    // Move to a fresh page if the heading + table will not fit under the transactions table.
+    const neededHeight = 8 + summaryRows.length * 5.6;
+    let summaryY = doc.lastAutoTable.finalY + 8;
+    if (summaryY + neededHeight > pageHeight - 18) {
+      doc.addPage();
+      summaryY = 20;
+    }
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(9.5);
+    doc.setTextColor(...RC_NAVY);
+    doc.text("PAYMENT SUMMARY", marginX, summaryY);
+
+    autoTable(doc, {
+      startY: summaryY + 3,
+      margin: { left: marginX, right: pageWidth / 2 + 10, top: 14, bottom: 18 },
+      pageBreak: "avoid",
+      body: summaryRows,
+      theme: "grid",
+      styles: {
+        font: "helvetica", fontSize: 7.5, cellPadding: 1.2,
+        lineColor: RC_BORDER, lineWidth: 0.2, textColor: RC_BLACK,
+      },
+      columnStyles: {
+        0: { fontStyle: "bold", cellWidth: 45, fillColor: RC_GREY },
+        1: { halign: "right" },
+      },
+    });
+  }
+
+  // --- Footer on every page (same as receipt footer + page numbers) ---
+  const pages = doc.getNumberOfPages();
+  const footerLineY = pageHeight - 12;
+  for (let p = 1; p <= pages; p += 1) {
+    doc.setPage(p);
+    doc.setDrawColor(...RC_BLACK);
+    doc.setLineWidth(0.15);
+    doc.line(marginX, footerLineY, pageWidth - marginX, footerLineY);
+
+    doc.setFont("helvetica", "bold");
+    doc.setFontSize(6);
+    doc.setTextColor(...RC_BLACK);
+    doc.text(`© ${year} ${hdr.footerName}. All rights reserved.`, marginX, footerLineY + 4);
+
+    if (hdr.poweredBy) {
+      doc.setFont("helvetica", "italic");
+      doc.setFontSize(5.5);
+      doc.setTextColor(90, 90, 90);
+      doc.text(hdr.poweredBy, pageWidth - marginX, footerLineY + 4, { align: "right" });
+    }
+
+    doc.setFont("helvetica", "normal");
+    doc.setFontSize(5.2);
+    doc.setTextColor(90, 90, 90);
+    doc.text("This is an official payments report. Duplication is prohibited.", marginX, footerLineY + 7.5);
+    doc.text(`Page ${p} of ${pages}`, pageWidth - marginX, footerLineY + 7.5, { align: "right" });
+  }
+
+  return doc;
+}
 
 // Same compact card styling as the Dashboard (scoped to .pay-compact)
 const PAGE_CSS = `
@@ -77,6 +296,7 @@ export default function Payments() {
   const [search, setSearch] = useState("");
   const [unpaid, setUnpaid] = useState(params.get("unpaid") === "1");
   const [selected, setSelected] = useState(null);
+  const [exporting, setExporting] = useState(false);
 
   // Receipt state: `receipt` is the sale shown in the preview window,
   // `busy` is "<saleId>:<view|download|print>" while something is being prepared.
@@ -91,11 +311,22 @@ export default function Payments() {
   const rows = sales.data || [];
   const s = summary.data;
 
-  const exportCsv = () =>
-    downloadCSV(`payments_${range.from}_${range.to}.csv`, rows.map((r) => ({
-      sale_number: r.sale_number, date: r.sold_at, customer: r.customer_name, method: r.payment_method,
-      reference: r.reference_number, total: r.total_amount, paid: r.amount_paid, balance: r.balance, served_by: r.served_by_name,
-    })));
+  // ---- PDF export (replaces the old CSV export) ---------------------------
+  const exportPdf = async () => {
+    if (exporting || !rows.length) return;
+    setExporting(true);
+    try {
+      const doc = buildPaymentsPdf({
+        rows, summary: s, range, method, search, unpaid,
+        profile: profile?.loaded ? profile : await loadShopProfile(),
+      });
+      doc.save(`payments_${range.from}_${range.to}.pdf`);
+    } catch {
+      toast.error("Could not generate the payments PDF");
+    } finally {
+      setExporting(false);
+    }
+  };
 
   // ---- receipt actions ----------------------------------------------------
   // The list API returns the sale without a browser-made QR, so build it first.
@@ -137,8 +368,9 @@ export default function Payments() {
         </div>
         <div className="page-header__actions">
           <DateRange from={range.from} to={range.to} onChange={setRange} />
-          <button className="btn btn-secondary" onClick={exportCsv} disabled={!rows.length}>
-            <i className="bi bi-download" aria-hidden="true" /> Export CSV
+          <button className="btn btn-secondary" onClick={exportPdf} disabled={!rows.length || exporting}>
+            <i className={`bi ${exporting ? "bi-hourglass-split" : "bi-file-earmark-pdf"}`} aria-hidden="true" />{" "}
+            {exporting ? "Preparing..." : "Export PDF"}
           </button>
         </div>
       </div>

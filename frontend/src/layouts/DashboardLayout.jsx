@@ -4,6 +4,7 @@ import { useState } from "react";
 import { Outlet } from "react-router-dom";
 import Navbar from "../components/Navbar.jsx";
 import Sidebar from "../components/Sidebar.jsx";
+import SubscriptionAlert from "../components/SubscriptionAlert.jsx";
 
 export default function DashboardLayout() {
   const [collapsed, setCollapsed] = useState(false); // desktop: hide sidebar
@@ -24,6 +25,8 @@ export default function DashboardLayout() {
           <Outlet />
         </main>
       </div>
+      {/* Pops up when the bundle is about to expire or the sales credits are running low */}
+      <SubscriptionAlert />
     </div>
   );
 }

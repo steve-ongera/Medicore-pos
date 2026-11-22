@@ -1,4 +1,8 @@
 # api/serializers.py
+#
+# Python names are now Product-based, but the JSON the frontend reads/sends is unchanged:
+#   - output keeps `medicine` / `medicine_name` (and also adds `product` / `product_name`)
+#   - input accepts `medicine` (what the frontend sends) or `product`
 import re
 from decimal import Decimal
 
@@ -6,21 +10,48 @@ from django.contrib.auth import get_user_model
 from django.contrib.auth.password_validation import validate_password
 from rest_framework import serializers
 
-from api.tenancy import get_current_shop
-
 from api.models import (
-    Medicine,
-    MedicineBatch,
+    BusinessType,
+    EXPIRY_TRACKED_TYPES,  # noqa: F401  (re-exported for other modules)
     OTCSale,
     OTCSaleAmendment,
     OTCSaleItem,
     PaymentMethod,
-    Role,
+    Product,
+    ProductBatch,
+    Role,  # noqa: F401
+    ShopSettings,
     StockTransaction,
+    SubscriptionRequest,
     Supplier,
 )
+from api.tenancy import get_current_shop
 
 User = get_user_model()
+
+
+# ---------------------------------------------------------------------------
+# Helpers
+# ---------------------------------------------------------------------------
+class ProductField(serializers.PrimaryKeyRelatedField):
+    """Evaluated per request, so it only offers THIS shop's products."""
+
+    def get_queryset(self):
+        return Product.objects.all()
+
+
+# Old name, in case another module imports it.
+MedicineField = ProductField
+
+
+class LegacyProductKeyMixin:
+    """Lets a payload use `product` instead of the legacy `medicine` key."""
+
+    def to_internal_value(self, data):
+        if "product" in data and "medicine" not in data:
+            data = data.copy()
+            data["medicine"] = data["product"]
+        return super().to_internal_value(data)
 
 
 # ---------------------------------------------------------------------------
@@ -37,13 +68,6 @@ class UserSerializer(serializers.ModelSerializer):
 
     def get_full_name(self, obj):
         return obj.get_full_name() or obj.username
-
-
-class MedicineField(serializers.PrimaryKeyRelatedField):
-    """Evaluated per request, so it only offers THIS shop's products."""
-
-    def get_queryset(self):
-        return Medicine.objects.all()
 
 
 class UserCreateSerializer(serializers.ModelSerializer):
@@ -90,12 +114,12 @@ def _check_image(value):
     return value
 
 
-class MedicineSerializer(serializers.ModelSerializer):
+class ProductSerializer(serializers.ModelSerializer):
     current_stock = serializers.IntegerField(read_only=True)
     is_low_stock = serializers.BooleanField(read_only=True)
 
     class Meta:
-        model = Medicine
+        model = Product
         fields = ["id", "name", "generic_name", "category", "unit", "unit_price",
                   "insurance_price", "reorder_level", "is_visible", "barcode", "sku",
                   "image", "current_stock", "is_low_stock", "created_at"]
@@ -107,7 +131,7 @@ class MedicineSerializer(serializers.ModelSerializer):
     def validate_barcode(self, value):
         value = value.strip()
         if value:
-            dupes = Medicine.objects.filter(barcode=value)  # tenant-scoped
+            dupes = Product.objects.filter(barcode=value)  # tenant-scoped
             if self.instance:
                 dupes = dupes.exclude(pk=self.instance.pk)
             if dupes.exists():
@@ -115,7 +139,7 @@ class MedicineSerializer(serializers.ModelSerializer):
         return value
 
 
-class MedicineAutocompleteSerializer(serializers.ModelSerializer):
+class ProductAutocompleteSerializer(serializers.ModelSerializer):
     """Light payload for the POS grid / search. `stock_qty` is annotated by the view.
     Pass context={"request": request} so `image` comes back as an absolute URL."""
 
@@ -123,7 +147,7 @@ class MedicineAutocompleteSerializer(serializers.ModelSerializer):
     is_low_stock = serializers.SerializerMethodField()
 
     class Meta:
-        model = Medicine
+        model = Product
         fields = ["id", "name", "generic_name", "category", "unit", "unit_price",
                   "insurance_price", "reorder_level", "is_visible", "barcode", "sku",
                   "image", "current_stock", "is_low_stock"]
@@ -135,13 +159,18 @@ class MedicineAutocompleteSerializer(serializers.ModelSerializer):
         return self.get_current_stock(obj) <= obj.reorder_level
 
 
-class MedicineBatchSerializer(serializers.ModelSerializer):
-    medicine_name = serializers.CharField(source="medicine.name", read_only=True)
+class ProductBatchSerializer(LegacyProductKeyMixin, serializers.ModelSerializer):
+    # Writable under the legacy key `medicine`; stored on the model as `product`.
+    medicine = ProductField(source="product")
+    medicine_name = serializers.CharField(source="product.name", read_only=True)
+    product = serializers.UUIDField(source="product_id", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
     supplier_name = serializers.CharField(source="supplier.name", read_only=True, default=None)
 
     class Meta:
-        model = MedicineBatch
-        fields = ["id", "medicine", "medicine_name", "supplier", "supplier_name",
+        model = ProductBatch
+        fields = ["id", "medicine", "medicine_name", "product", "product_name",
+                  "supplier", "supplier_name",
                   "batch_number", "quantity_received", "quantity_remaining",
                   "expiry_date", "received_date"]
         read_only_fields = ["id", "received_date", "quantity_remaining"]
@@ -155,13 +184,17 @@ class MedicineBatchSerializer(serializers.ModelSerializer):
 
 
 class StockTransactionSerializer(serializers.ModelSerializer):
-    medicine_name = serializers.CharField(source="medicine.name", read_only=True)
+    medicine = serializers.UUIDField(source="product_id", read_only=True)
+    medicine_name = serializers.CharField(source="product.name", read_only=True)
+    product = serializers.UUIDField(source="product_id", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
     batch_number = serializers.CharField(source="batch.batch_number", read_only=True, default=None)
     performed_by_name = serializers.SerializerMethodField()
 
     class Meta:
         model = StockTransaction
-        fields = ["id", "medicine", "medicine_name", "batch", "batch_number",
+        fields = ["id", "medicine", "medicine_name", "product", "product_name",
+                  "batch", "batch_number",
                   "transaction_type", "quantity", "reason",
                   "performed_by", "performed_by_name", "created_at"]
         read_only_fields = fields
@@ -171,13 +204,13 @@ class StockTransactionSerializer(serializers.ModelSerializer):
         return (u.get_full_name() or u.username) if u else None
 
 
-class QuickAddMedicineSerializer(serializers.Serializer):
+class QuickAddProductSerializer(serializers.Serializer):
     """Create product + first batch + STOCK_IN in one go (from the POS screen)."""
 
     name = serializers.CharField(max_length=150)
     generic_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
     category = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
-    unit = serializers.CharField(max_length=30, required=False, default="tablet")
+    unit = serializers.CharField(max_length=30, required=False, default="piece")
     unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"))
     insurance_price = serializers.DecimalField(
         max_digits=10, decimal_places=2, min_value=Decimal("0"),
@@ -195,7 +228,7 @@ class QuickAddMedicineSerializer(serializers.Serializer):
         return _check_image(value)
 
 
-class SetMedicineStockSerializer(serializers.Serializer):
+class SetProductStockSerializer(serializers.Serializer):
     """Stock-take: set the on-hand quantity to an exact number."""
 
     quantity = serializers.IntegerField(min_value=0)
@@ -206,14 +239,17 @@ class SetMedicineStockSerializer(serializers.Serializer):
 # Sales
 # ---------------------------------------------------------------------------
 class OTCSaleItemSerializer(serializers.ModelSerializer):
-    medicine_name = serializers.CharField(source="medicine.name", read_only=True)
-    unit = serializers.CharField(source="medicine.unit", read_only=True)
+    medicine = serializers.UUIDField(source="product_id", read_only=True)
+    medicine_name = serializers.CharField(source="product.name", read_only=True)
+    product = serializers.UUIDField(source="product_id", read_only=True)
+    product_name = serializers.CharField(source="product.name", read_only=True)
+    unit = serializers.CharField(source="product.unit", read_only=True)
     batch_number = serializers.CharField(source="batch.batch_number", read_only=True, default=None)
 
     class Meta:
         model = OTCSaleItem
-        fields = ["id", "medicine", "medicine_name", "unit", "batch", "batch_number",
-                  "quantity", "unit_price", "subtotal"]
+        fields = ["id", "medicine", "medicine_name", "product", "product_name", "unit",
+                  "batch", "batch_number", "quantity", "unit_price", "subtotal"]
 
 
 class OTCSaleSerializer(serializers.ModelSerializer):
@@ -242,8 +278,9 @@ class OTCSaleSerializer(serializers.ModelSerializer):
         return request.build_absolute_uri(obj.qr_code.url) if request else obj.qr_code.url
 
 
-class OTCSaleItemInputSerializer(serializers.Serializer):
-    medicine = MedicineField()
+class OTCSaleItemInputSerializer(LegacyProductKeyMixin, serializers.Serializer):
+    # Frontend sends `medicine`; validated_data exposes it as `product`.
+    medicine = ProductField(source="product")
     quantity = serializers.IntegerField(min_value=1)
     # Cashier-overridden total for this line (e.g. a negotiated price). Optional.
     line_amount = serializers.DecimalField(
@@ -281,9 +318,6 @@ class OTCSaleAmendmentSerializer(serializers.ModelSerializer):
 # ---------------------------------------------------------------------------
 # Settings & subscription
 # ---------------------------------------------------------------------------
-from api.models import BusinessType, EXPIRY_TRACKED_TYPES, ShopSettings, SubscriptionRequest  # noqa: E402,F401
-
-
 class ShopSettingsSerializer(serializers.ModelSerializer):
     class Meta:
         model = ShopSettings
@@ -351,8 +385,6 @@ class RegisterSerializer(serializers.Serializer):
         return value
 
 
-
-
 class ResetPasswordSerializer(serializers.Serializer):
     identifier = serializers.CharField()
     code = serializers.CharField(max_length=6, min_length=6)
@@ -361,3 +393,13 @@ class ResetPasswordSerializer(serializers.Serializer):
     def validate_new_password(self, value):
         validate_password(value)
         return value
+
+
+# ---------------------------------------------------------------------------
+# Backwards-compatible names (aliases) for any module still importing the old ones.
+# ---------------------------------------------------------------------------
+MedicineSerializer = ProductSerializer
+MedicineAutocompleteSerializer = ProductAutocompleteSerializer
+MedicineBatchSerializer = ProductBatchSerializer
+QuickAddMedicineSerializer = QuickAddProductSerializer
+SetMedicineStockSerializer = SetProductStockSerializer
