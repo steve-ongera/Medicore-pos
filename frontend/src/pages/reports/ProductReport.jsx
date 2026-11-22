@@ -63,7 +63,7 @@ export default function ProductReport() {
             <MetricCard icon="bi-cash-stack" variant="success" label="Product Revenue"
               value={formatCurrency(totalRevenue)} sub="From products sold in this period" />
             <MetricCard icon="bi-box-seam" variant="primary" label="Products Sold"
-              value={items.length} sub="Distinct medicines" />
+              value={items.length} sub="Distinct products" />
             <MetricCard icon="bi-trophy" variant="warning" label="Top Seller"
               value={topItem ? formatCurrency(topItem.revenue) : "-"}
               sub={topItem ? topItem.name : "No sales yet"} />
@@ -81,7 +81,7 @@ export default function ProductReport() {
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>#</th><th>Medicine</th>
+                      <th>#</th><th>Product</th>
                       <th className="text-right">Qty sold</th>
                       <th className="text-right">Revenue</th>
                       <th style={{ width: "26%" }} aria-label="Share of top seller" />

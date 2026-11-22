@@ -133,7 +133,7 @@ export default function Subscriptions() {
               <strong style={VALUE_STYLE}>{unlimited(limits.max_users)}</strong>
             </div>
             <div>
-              <div style={LABEL_STYLE}>Medicines</div>
+              <div style={LABEL_STYLE}>Products</div>
               <strong style={VALUE_STYLE}>{unlimited(limits.max_products)}</strong>
             </div>
             {isOwner && balance > 0 && (

@@ -1,0 +1,28 @@
+﻿pages\billing\WalkInSale.jsx:1487:  toast.error(`${medicine.name} shows 0 in stock.`);
+pages\billing\WalkInSale.jsx:1489:  toast.error(`Only ${avail} of ${medicine.name} available.`);
+pages\billing\WalkInSale.jsx:1503:  toast.error(`Only ${availableOf(line)} of ${line.medicine.name} available.`);
+pages\billing\WalkInSale.jsx:1558:  toast.error(`Enter a valid amount for ${bad.medicine.name}`);
+pages\billing\WalkInSale.jsx:1672:  <span className="font-medium truncate">{medicine.name}</span>
+pages\billing\WalkInSale.jsx:1702:  <span style={{ fontSize: 13, fontWeight: 500 }}>{line.medicine.name}</span>
+pages\billing\WalkInSale.jsx:1739:  aria-label={`Amount for ${line.medicine.name}`}
+pages\billing\WalkInSale.jsx:1960:  toast.error(`${medicine.name} shows 0 in stock. Click "Edit" to correct the stock.`);
+pages\billing\WalkInSale.jsx:1965:  toast.error(`Only ${stock} of ${medicine.name} in stock. If that's wrong, click "Edit" to correct it.`);
+pages\billing\WalkInSale.jsx:1983:  toast.error(`${medicine.name} is out of stock`);
+pages\billing\WalkInSale.jsx:1996:  toast.error(`Only ${max} of ${target.medicine.name} in stock. If that's wrong, click "Edit" to correct it.`);
+pages\billing\WalkInSale.jsx:2065:  toast.error(`Enter a valid amount for ${badLine.medicine.name}`);
+pages\billing\WalkInSale.jsx:2196:  <div className="font-medium truncate">{medicine.name}</div>
+pages\billing\WalkInSale.jsx:2201:  : `${medicine.current_stock} ${medicine.unit}${medicine.current_stock !== 1 ? "s" : ""} in stock`}
+pages\billing\WalkInSale.jsx:2232:  title={medicine.current_stock <= 0 ? "Out of stock" : `Add ${medicine.name} to cart`}
+pages\billing\WalkInSale.jsx:2235:  <i className={`bi ${iconForUnit(medicine.unit, profile.icon)}`}></i>
+pages\billing\WalkInSale.jsx:2237:  <span className="wis-catalog__name">{medicine.name}</span>
+pages\billing\WalkInSale.jsx:2241:  <span className={`wis-catalog__stock ${stockBadgeClass(medicine)}`}>
+pages\billing\WalkInSale.jsx:2244:  : `${medicine.current_stock} ${medicine.unit}${medicine.current_stock !== 1 ? "s" : ""}`}
+pages\billing\WalkInSale.jsx:2345:  item.quantity >= Number(item.medicine.current_stock) ? "is-over" : ""
+pages\billing\WalkInSale.jsx:2382:  aria-label={`Amount for ${item.medicine.name}`}
+pages\inventory\Inventory.jsx:415:  unit: medicine.unit, barcode: medicine.barcode || "", sku: medicine.sku || "",
+pages\inventory\Inventory.jsx:420:  <Modal wide title={`Edit ${medicine.name}`} onClose={onClose}
+pages\inventory\Inventory.jsx:446:  <Modal title={`Set stock - ${medicine.name}`} onClose={onClose}
+pages\inventory\Inventory.jsx:449:  System shows <strong>{medicine.current_stock}</strong> {medicine.unit}(s). Enter what is actually on the shelf; the difference is recorded as an adjustment.
+pages\inventory\Inventory.jsx:479:  <select className="select" value={f.medicine} onChange={set("medicine")}>
+pages\reports\StockReport.jsx:134:  <td className="cell-primary">{b.medicine}</td>
+utils\shopProfile.js:31:  label: "Pharmacy", item: "medicine", defaultUnit: "tablet", unitHint: "tablet, syrup...",

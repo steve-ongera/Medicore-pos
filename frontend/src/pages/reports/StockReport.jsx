@@ -88,7 +88,7 @@ export default function StockReport() {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Medicine</th><th>Category</th>
+                    <th>Product</th><th>Category</th>
                     <th className="text-right">Qty</th><th className="text-right">Price</th>
                     <th className="text-right">Value</th><th className="text-right">Reorder at</th>
                     <th>Status</th>
@@ -124,7 +124,7 @@ export default function StockReport() {
               <table className="data-table">
                 <thead>
                   <tr>
-                    <th>Medicine</th><th>Batch</th>
+                    <th>Product</th><th>Batch</th>
                     <th className="text-right">Remaining</th><th>Expiry</th><th>Days left</th>
                   </tr>
                 </thead>

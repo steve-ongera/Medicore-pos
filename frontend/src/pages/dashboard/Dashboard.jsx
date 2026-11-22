@@ -49,7 +49,7 @@ const QUICK_ACTIONS = [
     iconBg: "var(--primary-50)", iconColor: "var(--primary-600)" },
   { to: "/billing/payments", icon: "bi-receipt", title: "Payments", desc: "Transactions & balances",
     iconBg: "var(--info-soft)", iconColor: "var(--info-strong)" },
-  { to: "/inventory", icon: "bi-box-seam", title: "Inventory", desc: "Medicines & stock levels",
+  { to: "/inventory", icon: "bi-box-seam", title: "Inventory", desc: "Products & stock levels",
     iconBg: "var(--success-soft)", iconColor: "var(--success-strong)" },
 ];
 
@@ -220,7 +220,7 @@ export default function Dashboard() {
       <div className="grid-2 mb-4">
         <div className="chart-card min-w-0">
           <div className="chart-card__header">
-            <h5 className="card-title">Top Selling Medicines</h5>
+            <h5 className="card-title">Top Selling Products</h5>
             <span className="text-tertiary text-xs">By revenue</span>
           </div>
           <div style={{ height: 240 }}>
@@ -251,7 +251,7 @@ export default function Dashboard() {
             <div className="table-scroll">
               <table className="data-table">
                 <thead>
-                  <tr><th>Medicine</th><th className="text-right">In stock</th><th className="text-right">Reorder at</th></tr>
+                  <tr><th>Product</th><th className="text-right">In stock</th><th className="text-right">Reorder at</th></tr>
                 </thead>
                 <tbody>
                   {data.low_stock.map((m) => (

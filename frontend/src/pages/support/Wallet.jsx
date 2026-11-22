@@ -228,7 +228,7 @@ export default function Wallet() {
                 </strong>
               </div>
               <div>
-                <div style={LABEL_STYLE}>Medicines</div>
+                <div style={LABEL_STYLE}>Products</div>
                 <strong style={{ fontSize: "var(--fs-lg)", fontFamily: "var(--font-mono)", color: "var(--text-primary)" }}>
                   {unlimited(limits.max_products)}
                 </strong>

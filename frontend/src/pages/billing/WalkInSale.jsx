@@ -1,19 +1,25 @@
 // src/pages/billing/WalkInSale.jsx
+//
+// Walk-in POS screen for any kind of shop (pharmacy, supermarket, retail...).
+// Wording, currency and the receipt header/footer come from the shop's settings
+// via useShopProfile(), so there is nothing shop-specific hardcoded here.
 import { useEffect, useState } from "react";
 import jsPDF from "jspdf";
 import autoTable from "jspdf-autotable";
 import QRCode from "qrcode"; // npm i qrcode
 import { toast } from "../../context/ToastContext";
-import MedicineSearch, {
-  MedicineEditModal,
-  MedicineAddModal,
-  useCanEditMedicine,
-} from "../../components/MedicineSearch";
+import ProductSearch, {
+  ProductEditModal,
+  ProductAddModal,
+  useCanEditProduct,
+} from "../../components/ProductSearch";
 import { searchMedicines, createOTCSale, getOTCSales, amendOTCSale } from "../../services/api";
 import { formatDateTime } from "../../utils/formatters";
-import logoImage from "../../assets/logo.jpg";
-// To use a different image on the right, import it here, e.g.:
-// import clinicLogo from "../../assets/clinic-logo.png";
+import { useShopProfile, loadShopProfile } from "../../utils/shopProfile";
+// Default picture for products that have no image (save it as src/assets/no_image_available.png)
+import noImage from "../../assets/no_image_available.png";
+// Optional receipt logos: import an image and put it in RC_LOGOS below, e.g.
+// import shopLogo from "../../assets/shop-logo.png";
 
 const PAYMENT_METHODS = [
   { value: "CASH", label: "Cash" },
@@ -23,25 +29,29 @@ const PAYMENT_METHODS = [
 
 const toArray = (data) => (Array.isArray(data) ? data : data?.results ?? []);
 
-const UNIT_ICONS = {
-  tablet: "bi-capsule",
-  capsule: "bi-capsule",
-  syrup: "bi-droplet-half",
-  injection: "bi-syringe",
-  cream: "bi-droplet",
-  ointment: "bi-droplet",
-  drops: "bi-eyedropper",
-  inhaler: "bi-wind",
-  suppository: "bi-capsule-pill",
+// Product photo: the uploaded image, or the default "no image" picture.
+const imageOf = (m) => m?.image || noImage;
+const onImgError = (e) => {
+  e.currentTarget.onerror = null; // never loop if the default fails too
+  e.currentTarget.src = noImage;
 };
-const iconForUnit = (unit) => UNIT_ICONS[(unit || "").toLowerCase()] || "bi-capsule";
+function ProductImg({ product, className }) {
+  return (
+    <img
+      src={imageOf(product)}
+      alt=""
+      className={className}
+      loading="lazy"
+      onError={onImgError}
+    />
+  );
+}
 
 // ---------------------------------------------------------------------------
 // Editable cart amounts
-// The cashier may overwrite the amount of any cart line (e.g. 6 x A.P.C
-// tablets: KES 60 -> KES 100). `customAmount` holds that typed LINE TOTAL as a
-// string; when it is undefined the normal list price (unit_price x quantity)
-// is used.
+// The cashier may overwrite the amount of any cart line (e.g. 6 items listed at
+// 60 sold for 100). `customAmount` holds that typed LINE TOTAL as a string;
+// when it is undefined the normal list price (unit_price x quantity) is used.
 // ---------------------------------------------------------------------------
 const listAmountOf = (item) => Number(item.medicine.unit_price) * item.quantity;
 
@@ -59,7 +69,7 @@ const isInvalidCustomAmount = (item) =>
   (String(item.customAmount).trim() === "" || !(Number(item.customAmount) >= 0));
 
 // Change a line's quantity. If the cashier edited the amount, keep the edited
-// per-unit price (6 for KES 100 -> 7 for KES 116.67) instead of snapping back.
+// per-unit price (6 for 100 -> 7 for 116.67) instead of snapping back.
 const withQuantity = (item, quantity) => {
   if (!hasCustomAmount(item)) return { ...item, quantity };
   if (String(item.customAmount).trim() === "") return { ...item, quantity };
@@ -68,23 +78,33 @@ const withQuantity = (item, quantity) => {
 };
 
 // ---------------------------------------------------------------------------
-// RECEIPT PDF — EDIT THESE: clinic details shown on the receipt header/footer
+// RECEIPT: header / footer text comes from the shop settings (Settings page).
 // ---------------------------------------------------------------------------
-const CLINIC = {
-  name: "MEDICORE CLINICAL PHARMACY",
-  subtitle: "(Kwa Dr. Steve Biko)", // shown under the clinic name ("" to hide)
-  addressLine1: "P.O BOX 80700, MOMBASA", // <-- your P.O. Box + address
-  addressLine2: "Tel:+254 112 284 093  |  Email: info@medicorepos.co.ke", // <-- phone + email
-  motto: "YOUR HEALTH, OUR PRIORITY", // <-- motto ("" to hide)
-  footerName: "medicore Medical pharmacy",
-  poweredBy: "Powered by Medicore (www.medicore.com)", // ("" to hide)
+const POWERED_BY = "Powered by Cloud 360 (www.Cloud 360.com)"; // "" to hide
+
+// Optional header logos (PDF: far left / far right; preview: above the name).
+// Leave null for none, or point at an imported image.
+const RC_LOGOS = {
+  left: null, // e.g. shopLogo
+  right: null,
 };
 
-// PDF header logos: one at the far left, one at the far right.
-// Both use the same image for now. Point `right` at a second import to change it.
-const RC_LOGOS = {
-  left: logoImage,
-  right: logoImage, // e.g. clinicLogo
+// Builds the receipt header/footer lines from the shop profile.
+const receiptHeader = (profile) => {
+  const s = profile?.settings || {};
+  const name = s.name || profile?.shopName || "My Shop";
+  const contact = [s.phone && `Tel: ${s.phone}`, s.email && `Email: ${s.email}`]
+    .filter(Boolean)
+    .join("  |  ");
+  return {
+    name: name.toUpperCase(),
+    footerName: name,
+    subtitle: s.kra_pin ? `KRA PIN: ${s.kra_pin}` : "",
+    addressLine1: s.address || "",
+    addressLine2: contact,
+    thanks: s.receipt_footer || "Thank you for shopping with us.",
+    poweredBy: POWERED_BY,
+  };
 };
 
 const RC_NAVY = [31, 56, 100];
@@ -140,8 +160,10 @@ const getImageBase64 = (url) =>
   });
 
 // Builds the A5 receipt. ALWAYS exactly one page (no addPage anywhere).
-// `sale` is the object returned by POST /otc-sales/.
-async function buildReceiptPdf(sale) {
+// `sale` is the object returned by POST /otc-sales/; `profile` is the shop profile.
+async function buildReceiptPdf(sale, profile) {
+  const hdr = receiptHeader(profile);
+  const cur = profile?.currency || "KES";
   const doc = new jsPDF({ orientation: "portrait", unit: "mm", format: "a5" });
   const pageWidth = doc.internal.pageSize.getWidth(); // 148
   const pageHeight = doc.internal.pageSize.getHeight(); // 210
@@ -154,8 +176,8 @@ async function buildReceiptPdf(sale) {
     getImageBase64(sale.qr_code),
   ]);
 
-  // --- Header: logo at the far LEFT, logo at the far RIGHT,
-  //     clinic details centred between them ---
+  // --- Header: optional logo at the far LEFT / far RIGHT,
+  //     shop details centred between them ---
   const LOGO_TOP = 6;
   const LOGO_MAX_H = 13;
   const LOGO_MAX_W = 22; // kept narrow so the centred text never runs under a logo
@@ -179,36 +201,28 @@ async function buildReceiptPdf(sale) {
   drawLogo(base64LogoRight, "right");
 
   doc.setFont("helvetica", "bold");
-  doc.setFontSize(13);
+  doc.setFontSize(hdr.name.length > 32 ? 10.5 : 13);
   doc.setTextColor(...RC_NAVY);
-  doc.text(CLINIC.name, pageWidth / 2, 11, { align: "center" });
+  doc.text(hdr.name, pageWidth / 2, 11, { align: "center" });
 
-  if (CLINIC.subtitle) {
+  if (hdr.subtitle) {
     doc.setFont("helvetica", "bold");
     doc.setFontSize(7.5);
     doc.setTextColor(...RC_NAVY);
-    doc.text(CLINIC.subtitle, pageWidth / 2, 15, { align: "center" });
+    doc.text(hdr.subtitle, pageWidth / 2, 15, { align: "center" });
   }
 
   doc.setFont("helvetica", "normal");
   doc.setFontSize(6.5);
   doc.setTextColor(...RC_BLACK);
-  doc.text(CLINIC.addressLine1, pageWidth / 2, 18.5, { align: "center" });
-  doc.text(CLINIC.addressLine2, pageWidth / 2, 21.5, { align: "center" });
-
-  if (CLINIC.motto) {
-    doc.setFont("helvetica", "italic");
-    doc.setFontSize(6.5);
-    doc.setTextColor(110, 110, 110);
-    doc.text(CLINIC.motto, pageWidth / 2, 24.5, { align: "center" });
-  }
+  if (hdr.addressLine1) doc.text(hdr.addressLine1, pageWidth / 2, 18.5, { align: "center" });
+  if (hdr.addressLine2) doc.text(hdr.addressLine2, pageWidth / 2, 21.5, { align: "center" });
 
   doc.setDrawColor(...RC_NAVY);
   doc.setLineWidth(0.6);
   doc.line(marginX, 26.8, pageWidth - marginX, 26.8);
 
-  // --- Title (generated date sits on the right of the title row,
-  //     because the top-right corner is now taken by the logo) ---
+  // --- Title (generated date sits on the right of the title row) ---
   doc.setFont("helvetica", "bold");
   doc.setFontSize(9.5);
   doc.setTextColor(...RC_NAVY);
@@ -302,13 +316,13 @@ async function buildReceiptPdf(sale) {
   // --- Totals table ---
   const balance = Number(sale.balance || 0);
   const totalsRows = [
-    ["Subtotal", `KES ${money(sale.subtotal)}`],
-    ["Discount", `KES ${money(sale.discount)}`],
-    ["Total", `KES ${money(sale.total_amount)}`],
-    ["Amount Paid", `KES ${money(sale.amount_paid)}`],
+    ["Subtotal", `${cur} ${money(sale.subtotal)}`],
+    ["Discount", `${cur} ${money(sale.discount)}`],
+    ["Total", `${cur} ${money(sale.total_amount)}`],
+    ["Amount Paid", `${cur} ${money(sale.amount_paid)}`],
   ];
-  if (balance > 0) totalsRows.push(["Balance Due", `KES ${money(balance)}`]);
-  else if (balance < 0) totalsRows.push(["Change Given", `KES ${money(Math.abs(balance))}`]);
+  if (balance > 0) totalsRows.push(["Balance Due", `${cur} ${money(balance)}`]);
+  else if (balance < 0) totalsRows.push(["Change Given", `${cur} ${money(Math.abs(balance))}`]);
 
   autoTable(doc, {
     startY: doc.lastAutoTable.finalY + 3,
@@ -375,11 +389,17 @@ async function buildReceiptPdf(sale) {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(7);
   doc.setTextColor(...RC_BLACK);
-  doc.text("Official Clinic Stamp", stampX + stampWidth / 2, qrY + 5, { align: "center" });
+  doc.text("Official Shop Stamp", stampX + stampWidth / 2, qrY + 5, { align: "center" });
   doc.setFont("helvetica", "normal");
   doc.setFontSize(6);
   doc.setTextColor(120, 120, 120);
   doc.text("(Stamp here)", stampX + stampWidth / 2, qrY + qrSize / 2 + 2, { align: "center" });
+
+  // Thank-you line from the shop settings (receipt footer)
+  doc.setFont("helvetica", "italic");
+  doc.setFontSize(6.5);
+  doc.setTextColor(90, 90, 90);
+  doc.text(hdr.thanks, pageWidth / 2, sigY - 4, { align: "center", maxWidth: pageWidth - marginX * 2 });
 
   // Signature lines
   doc.setDrawColor(...RC_BLACK);
@@ -400,13 +420,13 @@ async function buildReceiptPdf(sale) {
   doc.setFont("helvetica", "bold");
   doc.setFontSize(6);
   doc.setTextColor(...RC_BLACK);
-  doc.text(`© ${year} ${CLINIC.footerName}. All rights reserved.`, marginX, footerLineY + 4);
+  doc.text(`© ${year} ${hdr.footerName}. All rights reserved.`, marginX, footerLineY + 4);
 
-  if (CLINIC.poweredBy) {
+  if (hdr.poweredBy) {
     doc.setFont("helvetica", "italic");
     doc.setFontSize(5.5);
     doc.setTextColor(90, 90, 90);
-    doc.text(CLINIC.poweredBy, pageWidth - marginX, footerLineY + 4, { align: "right" });
+    doc.text(hdr.poweredBy, pageWidth - marginX, footerLineY + 4, { align: "right" });
   }
 
   doc.setFont("helvetica", "normal");
@@ -417,15 +437,18 @@ async function buildReceiptPdf(sale) {
   return doc;
 }
 
-// Save the receipt as a PDF file
-export async function downloadReceiptPdf(sale) {
-  const doc = await buildReceiptPdf(sale);
+// Save the receipt as a PDF file.
+// `profile` is optional: other pages can keep calling downloadReceiptPdf(sale);
+// the shop profile is then loaded automatically.
+export async function downloadReceiptPdf(sale, profile) {
+  const doc = await buildReceiptPdf(sale, profile || (await loadShopProfile()));
   doc.save(`receipt_${sale.sale_number}.pdf`);
 }
 
-// Print the exact same PDF (hidden iframe, falls back to opening a tab)
-export async function printReceiptPdf(sale) {
-  const doc = await buildReceiptPdf(sale);
+// Print the exact same PDF (hidden iframe, falls back to opening a tab).
+// `profile` is optional, as above.
+export async function printReceiptPdf(sale, profile) {
+  const doc = await buildReceiptPdf(sale, profile || (await loadShopProfile()));
   const blobUrl = URL.createObjectURL(doc.output("blob"));
 
   const iframe = document.createElement("iframe");
@@ -467,7 +490,10 @@ export async function printReceiptPdf(sale) {
 // "Sale Complete" window: a large, paper-style receipt preview with the
 // Download PDF / Print buttons pinned underneath it.
 // ---------------------------------------------------------------------------
-function ReceiptModal({ receipt, onClose, onPrint, onDownload, printing, downloading }) {
+export function ReceiptModal({ receipt, onClose, onPrint, onDownload, printing, downloading }) {
+  const profile = useShopProfile();
+  const hdr = receiptHeader(profile);
+  const cur = profile.currency;
   const items = receipt.items || [];
   const corrected = Boolean(receipt.amended_at);
   const subtotal = Number(receipt.subtotal ?? 0);
@@ -497,14 +523,13 @@ function ReceiptModal({ receipt, onClose, onPrint, onDownload, printing, downloa
 
         <div className="wis-rcpt-scroll">
           <div className="wis-rcpt-paper">
-            {/* Header */}
+            {/* Header (from shop settings) */}
             <div className="wis-rcpt__center">
-              <img src={logoImage} alt={CLINIC.name} className="wis-rcpt__logo" />
-              <div className="wis-rcpt__org">{CLINIC.name}</div>
-              {CLINIC.subtitle && <div className="wis-rcpt__sub">{CLINIC.subtitle}</div>}
-              <div className="wis-rcpt__small">{CLINIC.addressLine1}</div>
-              <div className="wis-rcpt__small">{CLINIC.addressLine2}</div>
-              {CLINIC.motto && <div className="wis-rcpt__motto">{CLINIC.motto}</div>}
+              {RC_LOGOS.left && <img src={RC_LOGOS.left} alt={hdr.name} className="wis-rcpt__logo" />}
+              <div className="wis-rcpt__org">{hdr.name}</div>
+              {hdr.subtitle && <div className="wis-rcpt__sub">{hdr.subtitle}</div>}
+              {hdr.addressLine1 && <div className="wis-rcpt__small">{hdr.addressLine1}</div>}
+              {hdr.addressLine2 && <div className="wis-rcpt__small">{hdr.addressLine2}</div>}
             </div>
 
             <div className="wis-rcpt__dash" />
@@ -580,32 +605,32 @@ function ReceiptModal({ receipt, onClose, onPrint, onDownload, printing, downloa
               <span>
                 Subtotal ({unitsTotal} unit{unitsTotal !== 1 ? "s" : ""})
               </span>
-              <span>KES {money(subtotal)}</span>
+              <span>{cur} {money(subtotal)}</span>
             </div>
             {discount > 0 && (
               <div className="wis-rcpt__kv">
                 <span>Discount</span>
-                <span>- KES {money(discount)}</span>
+                <span>- {cur} {money(discount)}</span>
               </div>
             )}
             <div className="wis-rcpt__total">
               <span>TOTAL</span>
-              <span>KES {money(receipt.total_amount)}</span>
+              <span>{cur} {money(receipt.total_amount)}</span>
             </div>
             <div className="wis-rcpt__kv">
               <span>Amount Paid</span>
-              <span>KES {money(receipt.amount_paid)}</span>
+              <span>{cur} {money(receipt.amount_paid)}</span>
             </div>
             {balance > 0 && (
               <div className="wis-rcpt__kv is-due">
                 <span>Balance Due</span>
-                <strong>KES {money(balance)}</strong>
+                <strong>{cur} {money(balance)}</strong>
               </div>
             )}
             {balance < 0 && (
               <div className="wis-rcpt__kv">
                 <span>Change Given</span>
-                <strong>KES {money(Math.abs(balance))}</strong>
+                <strong>{cur} {money(Math.abs(balance))}</strong>
               </div>
             )}
 
@@ -620,8 +645,8 @@ function ReceiptModal({ receipt, onClose, onPrint, onDownload, printing, downloa
                 </>
               ) : null}
               <div className="wis-rcpt__thanks">THANK YOU FOR YOUR PURCHASE</div>
-              <div className="wis-rcpt__small">Get well soon. Keep this receipt for any returns.</div>
-              {CLINIC.poweredBy && <div className="wis-rcpt__powered">{CLINIC.poweredBy}</div>}
+              <div className="wis-rcpt__small">{hdr.thanks} Keep this receipt for any returns.</div>
+              {hdr.poweredBy && <div className="wis-rcpt__powered">{hdr.poweredBy}</div>}
             </div>
           </div>
         </div>
@@ -644,7 +669,7 @@ function ReceiptModal({ receipt, onClose, onPrint, onDownload, printing, downloa
   );
 }
 
-function WalkInSaleStyles() {
+export function WalkInSaleStyles() {
   return (
     <style>{`
       .wis-catalog {
@@ -728,15 +753,28 @@ function WalkInSaleStyles() {
         z-index: 1;
       }
 
-      .wis-catalog__icon {
-        width: 36px;
-        height: 36px;
-        display: grid;
-        place-items: center;
+      .wis-catalog__img {
+        width: 100%;
+        height: 92px;
+        object-fit: cover;
         border-radius: var(--radius-md);
-        background: var(--surface-hover);
-        color: var(--text-secondary);
-        font-size: 1.1rem;
+        background: #fff;
+        border: 1px solid var(--border-subtle);
+        flex-shrink: 0;
+      }
+      .wis-thumb {
+        width: 44px;
+        height: 44px;
+        object-fit: cover;
+        border-radius: 8px;
+        border: 1px solid var(--border-subtle);
+        background: #fff;
+        flex-shrink: 0;
+      }
+      .wis-thumb--sm {
+        width: 30px;
+        height: 30px;
+        border-radius: 6px;
       }
       .wis-catalog__name {
         font-weight: var(--fw-medium);
@@ -1155,6 +1193,10 @@ function WalkInSaleStyles() {
           font-size: 0.8rem;
         }
 
+        .wis-catalog__img {
+          height: 84px;
+        }
+
         /* Card header: stack title + add button */
         .wis-root .card-header {
           flex-wrap: wrap;
@@ -1359,11 +1401,13 @@ function WalkInSaleStyles() {
 }
 
 // ---------------------------------------------------------------------------
-// "Edit a sale": fix a sale that was already processed (wrong medicine, amount,
+// "Edit a sale": fix a sale that was already processed (wrong item, amount,
 // payment...). The corrected sale comes back from the server and is printed
 // from the normal receipt window.
 // ---------------------------------------------------------------------------
 function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, onSaved }) {
+  const profile = useShopProfile();
+  const cur = profile.currency;
   const [query, setQuery] = useState("");
   const [sales, setSales] = useState([]);
   const [loadingSales, setLoadingSales] = useState(true);
@@ -1380,7 +1424,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
   const [reason, setReason] = useState("");
   const [saving, setSaving] = useState(false);
   const [searchKey, setSearchKey] = useState(0);
-  const [editingMed, setEditingMed] = useState(null); // medicine being edited (name / price / stock)
+  const [editingMed, setEditingMed] = useState(null); // product being edited (name / price / stock)
 
   // Step 1: find the sale (recent sales, or search by number / customer / phone).
   useEffect(() => {
@@ -1415,7 +1459,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
       const med = catalogById[it.medicine] || {
         id: it.medicine,
         name: it.medicine_name,
-        unit: it.medicine_unit,
+        unit: it.unit,
         unit_price: it.unit_price,
         current_stock: 0,
       };
@@ -1449,9 +1493,9 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
     } else if (existing && existing.quantity >= avail) {
       toast.error(`Only ${avail} of ${medicine.name} available.`);
     } else if (existing) {
-      setLines((cur) => cur.map((l) => (l.medicine.id === medicine.id ? withQuantity(l, l.quantity + 1) : l)));
+      setLines((c) => c.map((l) => (l.medicine.id === medicine.id ? withQuantity(l, l.quantity + 1) : l)));
     } else {
-      setLines((cur) => [...cur, { medicine, quantity: 1 }]);
+      setLines((c) => [...c, { medicine, quantity: 1 }]);
     }
     setSearchKey((k) => k + 1);
   };
@@ -1464,24 +1508,24 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
       toast.error(`Only ${availableOf(line)} of ${line.medicine.name} available.`);
       return;
     }
-    setLines((cur) => cur.map((l) => (l.medicine.id === id ? withQuantity(l, quantity) : l)));
+    setLines((c) => c.map((l) => (l.medicine.id === id ? withQuantity(l, quantity) : l)));
   };
   const updateAmount = (id, value) =>
-    setLines((cur) => cur.map((l) => (l.medicine.id === id ? { ...l, customAmount: value } : l)));
+    setLines((c) => c.map((l) => (l.medicine.id === id ? { ...l, customAmount: value } : l)));
   const resetAmount = (id) =>
-    setLines((cur) =>
-      cur.map((l) => {
+    setLines((c) =>
+      c.map((l) => {
         if (l.medicine.id !== id) return l;
         const { customAmount, ...rest } = l;
         return rest;
       })
     );
-  const removeLine = (id) => setLines((cur) => cur.filter((l) => l.medicine.id !== id));
+  const removeLine = (id) => setLines((c) => c.filter((l) => l.medicine.id !== id));
 
-  // A medicine was edited (name, price or stock): refresh every line that uses it.
+  // A product was edited (name, price or stock): refresh every line that uses it.
   const applyUpdatedMedicine = (updated) => {
-    setLines((cur) =>
-      cur
+    setLines((c) =>
+      c
         .filter((l) => !(l.medicine.id === updated.id && updated.is_visible === false))
         .map((l) => {
           if (l.medicine.id !== updated.id) return l;
@@ -1556,7 +1600,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
             <h3 className="modal-title">{sale ? `Correct sale ${sale.sale_number}` : "Edit a sale"}</h3>
             <p className="modal-desc">
               {sale
-                ? `Originally KES ${originalTotal.toLocaleString()} · ${formatDateTime(sale.sold_at)}`
+                ? `Originally ${cur} ${originalTotal.toLocaleString()} · ${formatDateTime(sale.sold_at)}`
                 : "Find the sale that was entered wrongly"}
             </p>
           </div>
@@ -1608,7 +1652,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                         </div>
                       </div>
                       <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                        <span className="font-mono text-sm">KES {Number(s.total_amount).toLocaleString()}</span>
+                        <span className="font-mono text-sm">{cur} {Number(s.total_amount).toLocaleString()}</span>
                         <button type="button" className="btn btn-outline btn-sm" onClick={() => selectSale(s)}>
                           Edit
                         </button>
@@ -1620,19 +1664,19 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
             </>
           ) : (
             <>
-              <MedicineSearch
+              <ProductSearch
                 key={searchKey}
                 id="amend_medicine_search"
-                label="Add / replace a medicine"
-                placeholder="Search the correct medicine..."
+                label={`Add / replace a product`}
+                placeholder={`Search the correct product...`}
                 onSelect={addMedicine}
-                onMedicineUpdated={applyUpdatedMedicine}
-                onMedicineCreated={onCatalogChanged}
+                onProductUpdated={applyUpdatedMedicine}
+                onProductCreated={onCatalogChanged}
                 renderOption={(medicine) => (
                   <div style={{ display: "flex", justifyContent: "space-between", gap: "var(--space-3)" }}>
                     <span className="font-medium truncate">{medicine.name}</span>
                     <span className="font-mono text-sm flex-shrink-0">
-                      KES {Number(medicine.unit_price).toLocaleString()}
+                      {cur} {Number(medicine.unit_price).toLocaleString()}
                     </span>
                   </div>
                 )}
@@ -1640,7 +1684,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
 
               <div style={{ marginTop: "var(--space-3)" }}>
                 {lines.length === 0 ? (
-                  <p className="text-xs text-faint">No items. Search a medicine above to add one.</p>
+                  <p className="text-xs text-faint">No items. Search a product above to add one.</p>
                 ) : (
                   lines.map((line) => {
                     const custom = hasCustomAmount(line);
@@ -1658,6 +1702,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                           borderBottom: "1px solid var(--border-subtle)",
                         }}
                       >
+                        <ProductImg product={line.medicine} className="wis-thumb wis-thumb--sm" />
                         <div style={{ flex: "1 1 180px", minWidth: 0 }}>
                           <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", minWidth: 0 }}>
                             <span style={{ fontSize: 13, fontWeight: 500 }}>{line.medicine.name}</span>
@@ -1673,7 +1718,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                             )}
                           </div>
                           <div className="wis-cart-row__stock">
-                            Available: {availableOf(line)} &middot; List price: KES{" "}
+                            Available: {availableOf(line)} &middot; List price: {cur}{" "}
                             {Number(line.medicine.unit_price).toLocaleString()}
                           </div>
                         </div>
@@ -1687,7 +1732,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                           </button>
                         </div>
                         <div className="wis-amount">
-                          <span className="wis-amount__label">KES</span>
+                          <span className="wis-amount__label">{cur}</span>
                           <input
                             type="number"
                             inputMode="decimal"
@@ -1703,7 +1748,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                             <button
                               type="button"
                               className="wis-amount__reset"
-                              title={`Reset to list price (KES ${listAmountOf(line).toLocaleString()})`}
+                              title={`Reset to list price (${cur} ${listAmountOf(line).toLocaleString()})`}
                               onClick={() => resetAmount(line.medicine.id)}
                             >
                               <i className="bi bi-arrow-counterclockwise" style={{ fontSize: 12 }}></i>
@@ -1734,7 +1779,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                   <input className="input" type="tel" inputMode="tel" value={customerPhone} onChange={(e) => setCustomerPhone(e.target.value)} />
                 </div>
                 <div className="field">
-                  <label className="field-label">Discount (KES)</label>
+                  <label className="field-label">Discount ({cur})</label>
                   <input type="number" inputMode="decimal" min="0" step="0.01" className="input" value={discount} onChange={(e) => setDiscount(e.target.value)} />
                 </div>
                 <div className="field">
@@ -1752,7 +1797,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                   </div>
                 )}
                 <div className="field">
-                  <label className="field-label">Amount paid (KES)</label>
+                  <label className="field-label">Amount paid ({cur})</label>
                   <input type="number" inputMode="decimal" min="0" step="0.01" className="input" placeholder={total.toFixed(2)} value={amountPaid} onChange={(e) => setAmountPaid(e.target.value)} />
                 </div>
               </div>
@@ -1761,7 +1806,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
                 <label className="field-label">Reason for the correction (required)</label>
                 <input
                   className="input"
-                  placeholder="e.g. Wrong medicine selected / price entered incorrectly"
+                  placeholder="e.g. Wrong item selected / price entered incorrectly"
                   maxLength={255}
                   value={reason}
                   onChange={(e) => setReason(e.target.value)}
@@ -1770,13 +1815,13 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
 
               <div className="wis-summary-line wis-summary-line--total">
                 <span>New total</span>
-                <span className="font-mono">KES {total.toLocaleString()}</span>
+                <span className="font-mono">{cur} {total.toLocaleString()}</span>
               </div>
               <div className="text-xs text-faint">
-                Was KES {originalTotal.toLocaleString()}
+                Was {cur} {originalTotal.toLocaleString()}
                 {difference !== 0 && (
                   <>
-                    {" "}&middot; {difference > 0 ? "+" : "−"}KES {Math.abs(difference).toLocaleString()}
+                    {" "}&middot; {difference > 0 ? "+" : "−"}{cur} {Math.abs(difference).toLocaleString()}
                   </>
                 )}
               </div>
@@ -1805,7 +1850,7 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
 
     {editingMed && (
       <div style={{ position: "relative", zIndex: 1100 }}>
-        <MedicineEditModal
+        <ProductEditModal
           medicine={editingMed}
           onClose={() => setEditingMed(null)}
           onSaved={handleMedicineSaved}
@@ -1817,10 +1862,13 @@ function AmendSaleModal({ catalog, canEditMedicine, onCatalogChanged, onClose, o
 }
 
 export default function WalkInSale() {
-  // Changing this key clears the MedicineSearch box after an item is added to the cart.
+  const profile = useShopProfile();
+  const cur = profile.currency;
+
+  // Changing this key clears the ProductSearch box after an item is added to the cart.
   const [searchKey, setSearchKey] = useState(0);
 
-  // Every visible medicine, loaded once (no pagination) for the tap-to-add grid.
+  // Every visible product, loaded once (no pagination) for the tap-to-add grid.
   const [catalog, setCatalog] = useState([]);
   const [catalogLoading, setCatalogLoading] = useState(true);
 
@@ -1843,8 +1891,8 @@ export default function WalkInSale() {
   // "Edit a sale" window (correct a sale that was already processed).
   const [amendOpen, setAmendOpen] = useState(false);
 
-  // Edit / add medicine (same rights as the MedicineSearch dropdown).
-  const canEditMedicine = useCanEditMedicine();
+  // Edit / add product (same rights as the ProductSearch dropdown).
+  const canEditMedicine = useCanEditProduct();
   const [editing, setEditing] = useState(null);
   const [adding, setAdding] = useState(false);
 
@@ -1852,11 +1900,11 @@ export default function WalkInSale() {
     setCatalogLoading(true);
     try {
       // Empty query = browse mode: the autocomplete endpoint returns every
-      // visible medicine A-Z, unpaginated.
+      // visible product A-Z, unpaginated.
       const data = await searchMedicines("");
       setCatalog(toArray(data));
     } catch (err) {
-      toast.error(err.message || "Failed to load medicine catalog");
+      toast.error(err.message || "Failed to load the product catalog");
     } finally {
       setCatalogLoading(false);
     }
@@ -1878,7 +1926,7 @@ export default function WalkInSale() {
     };
   }, [cartOpen]);
 
-  // Keeps the cart in sync when a medicine is edited (price, name, stock, hidden).
+  // Keeps the cart in sync when a product is edited (price, name, stock, hidden).
   const syncUpdatedMedicine = (updated) => {
     setCart((current) =>
       current
@@ -1934,7 +1982,8 @@ export default function WalkInSale() {
     });
   };
 
-  // Called by MedicineSearch when a medicine is picked from the dropdown.
+  // Called by ProductSearch when a product is picked from the dropdown
+  // (or when a barcode scanner finishes a scan).
   const handleMedicineSelect = (medicine) => {
     if (Number(medicine.current_stock) <= 0) {
       toast.error(`${medicine.name} is out of stock`);
@@ -1992,7 +2041,7 @@ export default function WalkInSale() {
   const discountValue = Number(discount) || 0;
   const total = Math.max(subtotal - discountValue, 0);
 
-  // Total units in the cart + quantity per medicine (for the badge on each card).
+  // Total units in the cart + quantity per product (for the badge on each card).
   const cartUnits = cart.reduce((sum, item) => sum + item.quantity, 0);
   const cartQtyById = cart.reduce((map, item) => {
     map[item.medicine.id] = item.quantity;
@@ -2064,7 +2113,7 @@ export default function WalkInSale() {
     if (!receipt || printing) return;
     setPrinting(true);
     try {
-      await printReceiptPdf(receipt);
+      await printReceiptPdf(receipt, profile);
     } catch (err) {
       toast.error("Could not prepare the receipt for printing");
     } finally {
@@ -2076,7 +2125,7 @@ export default function WalkInSale() {
     if (!receipt || downloading) return;
     setDownloading(true);
     try {
-      await downloadReceiptPdf(receipt);
+      await downloadReceiptPdf(receipt, profile);
     } catch (err) {
       toast.error("Could not generate the receipt PDF");
     } finally {
@@ -2096,9 +2145,13 @@ export default function WalkInSale() {
 
       <div className="page-header">
         <div>
-          <div className="page-eyebrow">Pharmacy</div>
+          <div className="page-eyebrow">{profile.businessLabel}</div>
           <h1 className="page-title">Walk-in Sale / POS</h1>
-          <p className="page-subtitle">Sell medicine directly over the counter — no patient record required</p>
+          <p className="page-subtitle">
+            {profile.isPharmacy
+              ? "Sell products directly over the counter — no patient record required"
+              : `Ring up walk-in sales fast — scan a barcode or tap a product to add it`}
+          </p>
         </div>
         <div>
           <button type="button" className="btn btn-outline" onClick={() => setAmendOpen(true)}>
@@ -2109,11 +2162,11 @@ export default function WalkInSale() {
       </div>
 
       <div className="grid-8-4">
-        {/* Left Column - 8 columns: Medicine Selection */}
+        {/* Left Column - 8 columns: Product Selection */}
         <div className="grid-8-4__main">
           <div className="card">
             <div className="card-header">
-              <h2 className="card-title">Find Medicine</h2>
+              <h2 className="card-title">Find Product</h2>
               <div style={{ display: "flex", alignItems: "center", gap: "var(--space-3)" }}>
                 <span className="text-xs text-faint">
                   {catalogLoading ? "Loading catalog..." : `${catalog.length} item${catalog.length !== 1 ? "s" : ""}`}
@@ -2121,20 +2174,20 @@ export default function WalkInSale() {
                 {canEditMedicine && (
                   <button type="button" className="btn btn-outline btn-sm" onClick={() => setAdding(true)}>
                     <i className="bi bi-plus-lg" style={{ marginRight: "var(--space-1)" }}></i>
-                    Add new medicine
+                    Add new product
                   </button>
                 )}
               </div>
             </div>
             <div className="card-body">
-              <MedicineSearch
+              <ProductSearch
                 key={searchKey}
                 id="walkin_medicine_search"
-                label="Search medicine"
-                placeholder="Click to browse or type a medicine / generic name..."
+                label={`Search product`}
+                placeholder={`Scan a barcode, click to browse or type a product name...`}
                 onSelect={handleMedicineSelect}
-                onMedicineUpdated={syncUpdatedMedicine}
-                onMedicineCreated={loadCatalog}
+                onProductUpdated={syncUpdatedMedicine}
+                onProductCreated={loadCatalog}
                 renderOption={(medicine) => (
                   <div
                     style={{
@@ -2145,31 +2198,32 @@ export default function WalkInSale() {
                       opacity: Number(medicine.current_stock) <= 0 ? 0.5 : 1,
                     }}
                   >
-                    <div className="min-w-0">
+                    <ProductImg product={medicine} className="wis-thumb wis-thumb--sm" />
+                    <div className="min-w-0" style={{ flex: 1 }}>
                       <div className="font-medium truncate">{medicine.name}</div>
                       <div className="text-2xs text-faint truncate">
-                        {medicine.generic_name || "—"} &middot;{" "}
+                        {medicine.generic_name || medicine.barcode || "—"} &middot;{" "}
                         {Number(medicine.current_stock) <= 0
                           ? "Out of stock"
                           : `${medicine.current_stock} ${medicine.unit}${medicine.current_stock !== 1 ? "s" : ""} in stock`}
                       </div>
                     </div>
                     <span className="font-mono text-sm flex-shrink-0">
-                      KES {Number(medicine.unit_price).toLocaleString()}
+                      {cur} {Number(medicine.unit_price).toLocaleString()}
                     </span>
                   </div>
                 )}
               />
 
               {catalogLoading ? (
-                <p className="text-xs text-faint mt-3">Loading medicines...</p>
+                <p className="text-xs text-faint mt-3">Loading products...</p>
               ) : catalog.length === 0 ? (
                 <div className="empty-state">
                   <div className="empty-state__icon">
-                    <i className="bi bi-capsule" style={{ fontSize: "1.25rem" }}></i>
+                    <i className={`bi ${profile.icon}`} style={{ fontSize: "1.25rem" }}></i>
                   </div>
-                  <div className="empty-state__title">No medicines in catalog</div>
-                  <div className="empty-state__desc">Add medicines under Pharmacy &middot; Inventory first.</div>
+                  <div className="empty-state__title">No products in catalog</div>
+                  <div className="empty-state__desc">Add products under Stock &middot; Inventory first.</div>
                 </div>
               ) : (
                 <div className="wis-catalog mt-3">
@@ -2184,12 +2238,10 @@ export default function WalkInSale() {
                           disabled={medicine.current_stock <= 0}
                           title={medicine.current_stock <= 0 ? "Out of stock" : `Add ${medicine.name} to cart`}
                         >
-                          <span className="wis-catalog__icon">
-                            <i className={`bi ${iconForUnit(medicine.unit)}`}></i>
-                          </span>
+                          <ProductImg product={medicine} className="wis-catalog__img" />
                           <span className="wis-catalog__name">{medicine.name}</span>
                           <span className="wis-catalog__price">
-                            KES {Number(medicine.unit_price).toLocaleString()}
+                            {cur} {Number(medicine.unit_price).toLocaleString()}
                           </span>
                           <span className={`wis-catalog__stock ${stockBadgeClass(medicine)}`}>
                             {medicine.current_stock <= 0
@@ -2251,7 +2303,7 @@ export default function WalkInSale() {
                     <i className="bi bi-cart" style={{ fontSize: "1.25rem" }}></i>
                   </div>
                   <div className="empty-state__title" style={{ fontSize: "14px" }}>Cart is empty</div>
-                  <div className="empty-state__desc" style={{ fontSize: "12px" }}>Tap a medicine to add it.</div>
+                  <div className="empty-state__desc" style={{ fontSize: "12px" }}>Tap a product or scan a barcode to add it.</div>
                 </div>
               ) : (
                 <div style={{ maxHeight: "300px", overflowY: "auto" }}>
@@ -2265,10 +2317,12 @@ export default function WalkInSale() {
                           display: "flex",
                           alignItems: "center",
                           justifyContent: "space-between",
+                          gap: "var(--space-2)",
                           padding: "var(--space-2) var(--space-3)",
                           borderBottom: "1px solid var(--border-subtle)",
                         }}
                       >
+                        <ProductImg product={item.medicine} className="wis-thumb" />
                         <div style={{ flex: 1, minWidth: 0 }}>
                           <div className="wis-cart-row__name">
                             <span
@@ -2298,7 +2352,7 @@ export default function WalkInSale() {
                               item.quantity >= Number(item.medicine.current_stock) ? "is-over" : ""
                             }`}
                           >
-                            In stock: {Number(item.medicine.current_stock)} &middot; List price: KES{" "}
+                            In stock: {Number(item.medicine.current_stock)} &middot; List price: {cur}{" "}
                             {Number(item.medicine.unit_price).toLocaleString()}
                           </div>
                           <div className="wis-cart-row__controls">
@@ -2322,7 +2376,7 @@ export default function WalkInSale() {
 
                             {/* Editable line amount: type 100 instead of the list price 60 */}
                             <div className="wis-amount">
-                              <span className="wis-amount__label">KES</span>
+                              <span className="wis-amount__label">{cur}</span>
                               <input
                                 type="number"
                                 inputMode="decimal"
@@ -2338,7 +2392,7 @@ export default function WalkInSale() {
                                 <button
                                   type="button"
                                   className="wis-amount__reset"
-                                  title={`Reset to list price (KES ${listAmountOf(item).toLocaleString()})`}
+                                  title={`Reset to list price (${cur} ${listAmountOf(item).toLocaleString()})`}
                                   onClick={() => resetLineAmount(item.medicine.id)}
                                 >
                                   <i className="bi bi-arrow-counterclockwise" style={{ fontSize: "12px" }}></i>
@@ -2398,11 +2452,11 @@ export default function WalkInSale() {
 
               <div className="wis-summary-line">
                 <span className="text-muted">Subtotal</span>
-                <span className="font-mono">KES {subtotal.toLocaleString()}</span>
+                <span className="font-mono">{cur} {subtotal.toLocaleString()}</span>
               </div>
 
               <div className="field">
-                <label className="field-label">Discount (KES)</label>
+                <label className="field-label">Discount ({cur})</label>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -2416,7 +2470,7 @@ export default function WalkInSale() {
 
               <div className="wis-summary-line wis-summary-line--total">
                 <span>Total</span>
-                <span className="font-mono">KES {total.toLocaleString()}</span>
+                <span className="font-mono">{cur} {total.toLocaleString()}</span>
               </div>
 
               <div className="field">
@@ -2440,7 +2494,7 @@ export default function WalkInSale() {
               )}
 
               <div className="field" style={{ marginBottom: 0 }}>
-                <label className="field-label">Amount paid (KES)</label>
+                <label className="field-label">Amount paid ({cur})</label>
                 <input
                   type="number"
                   inputMode="decimal"
@@ -2455,7 +2509,7 @@ export default function WalkInSale() {
             </div>
             <div className="card-footer" style={{ display: "block" }}>
               <button type="submit" className="btn btn-primary btn-block" disabled={submitting || cart.length === 0}>
-                {submitting ? "Processing..." : `Complete Sale — KES ${total.toLocaleString()}`}
+                {submitting ? "Processing..." : `Complete Sale — ${cur} ${total.toLocaleString()}`}
               </button>
             </div>
           </form>
@@ -2470,7 +2524,7 @@ export default function WalkInSale() {
               <span className="wis-bar__count" key={cartUnits}>{cartUnits}</span>
               <span>View cart &amp; checkout</span>
             </span>
-            <span className="wis-bar__total">KES {total.toLocaleString()}</span>
+            <span className="wis-bar__total">{cur} {total.toLocaleString()}</span>
           </button>
         </div>
       )}
@@ -2486,7 +2540,7 @@ export default function WalkInSale() {
       )}
 
       {editing && (
-        <MedicineEditModal
+        <ProductEditModal
           medicine={editing}
           onClose={() => setEditing(null)}
           onSaved={handleMedicineSaved}
@@ -2494,7 +2548,7 @@ export default function WalkInSale() {
       )}
 
       {adding && (
-        <MedicineAddModal
+        <ProductAddModal
           initialName=""
           onClose={() => setAdding(false)}
           onCreated={handleMedicineCreated}

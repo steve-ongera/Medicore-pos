@@ -1,4 +1,5 @@
 # api/serializers.py
+import re
 from decimal import Decimal
 
 from django.contrib.auth import get_user_model
@@ -80,6 +81,15 @@ class SupplierSerializer(serializers.ModelSerializer):
         read_only_fields = ["id", "created_at"]
 
 
+MAX_IMAGE_BYTES = 5 * 1024 * 1024
+
+
+def _check_image(value):
+    if value and value.size > MAX_IMAGE_BYTES:
+        raise serializers.ValidationError("Image must be 5 MB or smaller.")
+    return value
+
+
 class MedicineSerializer(serializers.ModelSerializer):
     current_stock = serializers.IntegerField(read_only=True)
     is_low_stock = serializers.BooleanField(read_only=True)
@@ -88,8 +98,11 @@ class MedicineSerializer(serializers.ModelSerializer):
         model = Medicine
         fields = ["id", "name", "generic_name", "category", "unit", "unit_price",
                   "insurance_price", "reorder_level", "is_visible", "barcode", "sku",
-                  "current_stock", "is_low_stock", "created_at"]
+                  "image", "current_stock", "is_low_stock", "created_at"]
         read_only_fields = ["id", "created_at"]
+
+    def validate_image(self, value):
+        return _check_image(value)
 
     def validate_barcode(self, value):
         value = value.strip()
@@ -103,7 +116,8 @@ class MedicineSerializer(serializers.ModelSerializer):
 
 
 class MedicineAutocompleteSerializer(serializers.ModelSerializer):
-    """Light payload for the POS grid / search. `stock_qty` is annotated by the view."""
+    """Light payload for the POS grid / search. `stock_qty` is annotated by the view.
+    Pass context={"request": request} so `image` comes back as an absolute URL."""
 
     current_stock = serializers.SerializerMethodField()
     is_low_stock = serializers.SerializerMethodField()
@@ -112,7 +126,7 @@ class MedicineAutocompleteSerializer(serializers.ModelSerializer):
         model = Medicine
         fields = ["id", "name", "generic_name", "category", "unit", "unit_price",
                   "insurance_price", "reorder_level", "is_visible", "barcode", "sku",
-                  "current_stock", "is_low_stock"]
+                  "image", "current_stock", "is_low_stock"]
 
     def get_current_stock(self, obj):
         return getattr(obj, "stock_qty", None) or 0
@@ -165,12 +179,20 @@ class QuickAddMedicineSerializer(serializers.Serializer):
     category = serializers.CharField(max_length=100, required=False, allow_blank=True, default="")
     unit = serializers.CharField(max_length=30, required=False, default="tablet")
     unit_price = serializers.DecimalField(max_digits=10, decimal_places=2, min_value=Decimal("0"))
+    insurance_price = serializers.DecimalField(
+        max_digits=10, decimal_places=2, min_value=Decimal("0"),
+        required=False, allow_null=True, default=None,
+    )
     reorder_level = serializers.IntegerField(min_value=0, required=False, default=20)
     quantity = serializers.IntegerField(min_value=1)
     batch_number = serializers.CharField(max_length=60, required=False, allow_blank=True, default="")
     expiry_date = serializers.DateField(required=False, allow_null=True, default=None)
     barcode = serializers.CharField(max_length=64, required=False, allow_blank=True, default="")
     sku = serializers.CharField(max_length=60, required=False, allow_blank=True, default="")
+    image = serializers.ImageField(required=False, allow_null=True, default=None)
+
+    def validate_image(self, value):
+        return _check_image(value)
 
 
 class SetMedicineStockSerializer(serializers.Serializer):
@@ -306,12 +328,36 @@ class RegisterSerializer(serializers.Serializer):
     username = serializers.CharField(max_length=150)
     password = serializers.CharField(write_only=True)
     first_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
-    email = serializers.EmailField(required=False, allow_blank=True, default="")
+    last_name = serializers.CharField(max_length=150, required=False, allow_blank=True, default="")
+    # Required now: people sign in with their email.
+    email = serializers.EmailField()
     phone = serializers.CharField(max_length=20, required=False, allow_blank=True, default="")
     # Optional: the current sign-up form does not send these, so new shops default to a pharmacy.
     business_type = serializers.ChoiceField(choices=BusinessType.choices, required=False, default=BusinessType.PHARMACY)
     tracks_expiry = serializers.BooleanField(required=False, default=None, allow_null=True)
 
+    def validate_email(self, value):
+        return value.strip().lower()
+
+    def validate_username(self, value):
+        value = value.strip().lower()
+        if (not re.match(r"^[a-z0-9._]{3,30}$", value) or value.startswith(".")
+                or value.endswith(".") or ".." in value):
+            raise serializers.ValidationError("Use 3-30 letters, numbers, dots or underscores.")
+        return value
+
     def validate_password(self, value):
+        validate_password(value)
+        return value
+
+
+
+
+class ResetPasswordSerializer(serializers.Serializer):
+    identifier = serializers.CharField()
+    code = serializers.CharField(max_length=6, min_length=6)
+    new_password = serializers.CharField(write_only=True)
+
+    def validate_new_password(self, value):
         validate_password(value)
         return value

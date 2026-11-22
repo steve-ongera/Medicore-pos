@@ -1,6 +1,8 @@
 // src/pages/billing/Payments.jsx
 // Restyled to match the compact Dashboard: same metric cards, 8px radius cards/tables,
-// design-system buttons, inputs, badges and data-table. Data and behaviour are unchanged.
+// design-system buttons, inputs, badges and data-table.
+// Receipts: every sale can be viewed, downloaded (PDF) and printed, using the exact same
+// receipt as the Walk-in Sale screen.
 import { useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "../../context/ToastContext";
@@ -9,6 +11,10 @@ import {
 } from "../../components/PageKit";
 import { addOTCSalePayment, getOTCSales, getPaymentsSummary } from "../../services/api";
 import { formatCurrency, formatDateTime } from "../../utils/formatters";
+import { useShopProfile } from "../../utils/shopProfile";
+import {
+  ReceiptModal, WalkInSaleStyles, resolveReceiptQr, downloadReceiptPdf, printReceiptPdf,
+} from "./WalkInSale";
 
 // Same compact card styling as the Dashboard (scoped to .pay-compact)
 const PAGE_CSS = `
@@ -36,6 +42,13 @@ const PAGE_CSS = `
   .pay-compact .pay-filters .select{width:160px;height:36px}
   .pay-compact .pay-filters .btn,
   .pay-compact .page-header__actions .btn{height:36px}
+
+  /* Receipt action buttons (View / Download / Print) */
+  .pay-actions{display:inline-flex;align-items:center;gap:4px;white-space:nowrap}
+  .pay-actions__btn{width:30px;height:30px;display:inline-grid;place-items:center;border:1px solid #e6ebf1;border-radius:6px;background:var(--surface,#fff);color:#475569;cursor:pointer;transition:background .15s,color .15s,border-color .15s}
+  .pay-actions__btn:hover:not(:disabled){background:#eaf1ff;color:#2f5fd0;border-color:#c9d8f7}
+  .pay-actions__btn:disabled{opacity:.5;cursor:wait}
+
   @media (max-width:640px){
     .pay-compact .pay-filters .input,
     .pay-compact .pay-filters .select{width:100%}
@@ -56,6 +69,7 @@ function MetricCard({ icon, variant = "primary", label, value, sub }) {
 }
 
 export default function Payments() {
+  const profile = useShopProfile();
   const [params, setParams] = useSearchParams();
   const today = isoDate(new Date());
   const [range, setRange] = useState({ from: today, to: today });
@@ -63,6 +77,11 @@ export default function Payments() {
   const [search, setSearch] = useState("");
   const [unpaid, setUnpaid] = useState(params.get("unpaid") === "1");
   const [selected, setSelected] = useState(null);
+
+  // Receipt state: `receipt` is the sale shown in the preview window,
+  // `busy` is "<saleId>:<view|download|print>" while something is being prepared.
+  const [receipt, setReceipt] = useState(null);
+  const [busy, setBusy] = useState("");
 
   const q = { date_from: range.from, date_to: range.to, payment_method: method, search, unpaid: unpaid ? 1 : "" };
   const sales = useFetch(() => getOTCSales(q), [range.from, range.to, method, search, unpaid]);
@@ -77,6 +96,34 @@ export default function Payments() {
       sale_number: r.sale_number, date: r.sold_at, customer: r.customer_name, method: r.payment_method,
       reference: r.reference_number, total: r.total_amount, paid: r.amount_paid, balance: r.balance, served_by: r.served_by_name,
     })));
+
+  // ---- receipt actions ----------------------------------------------------
+  // The list API returns the sale without a browser-made QR, so build it first.
+  const withQr = async (sale) => ({ ...sale, qr_code: await resolveReceiptQr(sale) });
+
+  const runReceipt = async (sale, kind) => {
+    const key = `${sale.id}:${kind}`;
+    if (busy) return;
+    setBusy(key);
+    try {
+      const full = await withQr(sale);
+      if (kind === "view") setReceipt(full);
+      else if (kind === "download") await downloadReceiptPdf(full, profile);
+      else await printReceiptPdf(full, profile);
+    } catch {
+      toast.error(
+        kind === "view" ? "Could not open the receipt"
+          : kind === "download" ? "Could not generate the receipt PDF"
+          : "Could not prepare the receipt for printing"
+      );
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const viewReceipt = (sale) => runReceipt(sale, "view");
+  const downloadReceipt = (sale) => runReceipt(sale, "download");
+  const printReceipt = (sale) => runReceipt(sale, "print");
 
   return (
     <div className="pay-compact">
@@ -152,6 +199,7 @@ export default function Payments() {
                   <th>Sale</th><th>Time</th><th>Customer</th><th>Method</th><th>Reference</th>
                   <th className="text-right">Total</th><th className="text-right">Paid</th>
                   <th className="text-right">Balance</th><th>Served by</th>
+                  <th className="text-right">Receipt</th>
                 </tr>
               </thead>
               <tbody>
@@ -170,6 +218,25 @@ export default function Payments() {
                         : <span className="badge badge-success">Paid</span>}
                     </td>
                     <td>{r.served_by_name}</td>
+                    <td className="text-right" onClick={(e) => e.stopPropagation()}>
+                      <span className="pay-actions">
+                        <button type="button" className="pay-actions__btn" title="View receipt"
+                          aria-label={`View receipt ${r.sale_number}`}
+                          disabled={!!busy} onClick={() => viewReceipt(r)}>
+                          <i className={`bi ${busy === `${r.id}:view` ? "bi-hourglass-split" : "bi-eye"}`} />
+                        </button>
+                        <button type="button" className="pay-actions__btn" title="Download PDF"
+                          aria-label={`Download receipt ${r.sale_number}`}
+                          disabled={!!busy} onClick={() => downloadReceipt(r)}>
+                          <i className={`bi ${busy === `${r.id}:download` ? "bi-hourglass-split" : "bi-file-earmark-pdf"}`} />
+                        </button>
+                        <button type="button" className="pay-actions__btn" title="Print receipt"
+                          aria-label={`Print receipt ${r.sale_number}`}
+                          disabled={!!busy} onClick={() => printReceipt(r)}>
+                          <i className={`bi ${busy === `${r.id}:print` ? "bi-hourglass-split" : "bi-printer"}`} />
+                        </button>
+                      </span>
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -180,13 +247,32 @@ export default function Payments() {
 
       {selected && (
         <SaleModal sale={selected} onClose={() => setSelected(null)}
-          onPaid={() => { setSelected(null); refresh(); }} />
+          onPaid={() => { setSelected(null); refresh(); }}
+          onView={() => viewReceipt(selected)}
+          onDownload={() => downloadReceipt(selected)}
+          onPrint={() => printReceipt(selected)}
+          receiptBusy={!!busy} />
+      )}
+
+      {/* Receipt preview (same window as the Walk-in Sale screen) */}
+      {receipt && (
+        <>
+          <WalkInSaleStyles />
+          <ReceiptModal
+            receipt={receipt}
+            onClose={() => setReceipt(null)}
+            onPrint={() => printReceipt(receipt)}
+            onDownload={() => downloadReceipt(receipt)}
+            printing={!!busy && busy.endsWith(":print")}
+            downloading={!!busy && busy.endsWith(":download")}
+          />
+        </>
       )}
     </div>
   );
 }
 
-function SaleModal({ sale, onClose, onPaid }) {
+function SaleModal({ sale, onClose, onPaid, onView, onDownload, onPrint, receiptBusy }) {
   const owed = Number(sale.balance);
   const [amount, setAmount] = useState(owed > 0 ? String(owed) : "");
   const [reference, setReference] = useState("");
@@ -207,11 +293,24 @@ function SaleModal({ sale, onClose, onPaid }) {
 
   return (
     <Modal wide title={`Sale ${sale.sale_number}`} onClose={onClose}
-      footer={owed > 0 ? (
-        <button className={`btn btn-primary${busy ? " is-loading" : ""}`} disabled={busy || !Number(amount)} onClick={collect}>
-          <i className="bi bi-check2" aria-hidden="true" /> {busy ? "Saving…" : "Record payment"}
-        </button>
-      ) : <button className="btn btn-secondary" onClick={onClose}>Close</button>}>
+      footer={(
+        <>
+          <button className="btn btn-outline" onClick={onView} disabled={receiptBusy}>
+            <i className="bi bi-eye" aria-hidden="true" /> View receipt
+          </button>
+          <button className="btn btn-outline" onClick={onDownload} disabled={receiptBusy}>
+            <i className="bi bi-file-earmark-pdf" aria-hidden="true" /> Download
+          </button>
+          <button className="btn btn-outline" onClick={onPrint} disabled={receiptBusy}>
+            <i className="bi bi-printer" aria-hidden="true" /> Print
+          </button>
+          {owed > 0 ? (
+            <button className={`btn btn-primary${busy ? " is-loading" : ""}`} disabled={busy || !Number(amount)} onClick={collect}>
+              <i className="bi bi-check2" aria-hidden="true" /> {busy ? "Saving…" : "Record payment"}
+            </button>
+          ) : <button className="btn btn-secondary" onClick={onClose}>Close</button>}
+        </>
+      )}>
       <p className="text-sm text-muted mb-3">
         {formatDateTime(sale.sold_at)} · {sale.customer_name || "Walk-in"} · {METHOD_LABEL[sale.payment_method]}
       </p>

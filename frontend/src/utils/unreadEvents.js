@@ -1,7 +1,7 @@
 // src/utils/unreadEvents.js
 // Tiny event bus so the navbar badges update the moment a page marks something as read,
 // instead of waiting for the next 15 second poll.
-const EVENT = "medicore:unread-changed";
+const EVENT = "Cloud 360:unread-changed";
 
 export const notifyUnreadChanged = () => window.dispatchEvent(new Event(EVENT));
 

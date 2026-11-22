@@ -1,42 +1,54 @@
-// src/components/MedicineSearch.jsx
+// src/components/ProductSearch.jsx
 //
-// Reusable medicine search box. Uses /medicines/autocomplete/ (searchMedicines)
-// by default. Mirrors PatientSearch: debounced, ignores out-of-order responses,
-// and clears the selection if the user edits the text afterwards, so a stale
-// medicine can't be submitted by mistake.
+// Reusable product search box (the file keeps its old name so every import keeps
+// working). Works for any kind of shop: wording ("medicine" / "product" / "item"),
+// expiry fields and currency come from the shop's settings via useShopProfile().
+//
+// Uses /medicines/autocomplete/ (searchMedicines) by default. Debounced, ignores
+// out-of-order responses, and clears the selection if the user edits the text
+// afterwards, so a stale product can't be submitted by mistake.
 //
 // BROWSE MODE
-//   With the built-in search, click the box to see EVERY visible medicine
-//   (scrollable); type to narrow by name or generic name. Pages that pass their
-//   own `searchFn` keep the old "type at least 2 characters" behaviour unless
-//   they also pass `minChars`.
+//   With the built-in search, click the box to see EVERY visible product
+//   (scrollable); type to narrow by name, brand/generic name, barcode or SKU.
+//   Pages that pass their own `searchFn` keep the old "type at least 2
+//   characters" behaviour unless they also pass `minChars`.
 //
-// Results are shown in a clean two-column table (Medicine | Price). If
+// BARCODE SCANNERS
+//   A scanner types the code and presses Enter. On Enter the box looks for an
+//   exact barcode / SKU match (or a single result) and selects it immediately.
+//
+// Results are shown in a clean two-column table (Item | Price). If
 // `renderOption` is passed, each row is a single full-width cell containing
 // whatever that function returns (the cell is allowed to shrink so long names
 // truncate and the Edit column always stays visible).
 //
-// CLINICAL STAFF TOOLS (fully opt-out)
-//   Doctors, nurses, pharmacists, Super Admin and Group Admin get:
-//     * an "Edit" button on every result row. The modal changes the medicine's
-//       details, its visibility and the stock available at THEIR branch.
-//       Save stays disabled until something actually changes.
-//     * an "Add new medicine" option when the medicine they need isn't found.
-//       It creates the medicine plus a stock batch at their branch, then
-//       selects it so the order can continue. Pharmacy can verify it later.
-//   Hidden medicines are removed from normal pickers; editors still see them
+// STAFF TOOLS (fully opt-out)
+//   Owners, pharmacists / store managers (and the old clinical roles) get:
+//     * an "Edit" button on every result row. The modal changes the product's
+//       details, its visibility and the stock on hand. Save stays disabled
+//       until something actually changes.
+//     * an "Add new product" option when the product they need isn't found.
+//       It creates the product plus a stock batch, then selects it so the sale
+//       can continue.
+//   Hidden products are removed from normal pickers; editors still see them
 //   (greyed out, not selectable) so they can un-hide them.
 //   Everyone else sees the component exactly as before.
 //
-// EXTRA EXPORTS (for pages that render their own medicine lists)
-//   MedicineEditModal   the edit pop-up
-//   MedicineAddModal    the add pop-up
-//   useCanEditMedicine  true when the current user may edit/add medicines
+// PRODUCT IMAGES
+//   Add / edit pop-ups let staff upload a photo (max 5 MB). Products without one
+//   show the default picture from src/assets/no_image_available.png.
+//
+// EXTRA EXPORTS (for pages that render their own product lists)
+//   ImagePicker        photo chooser used by the pop-ups
+//   ProductEditModal   the edit pop-up
+//   ProductAddModal    the add pop-up
+//   useCanEditProduct  true when the current user may edit/add products
 //
 // Props
-//   onSelect(medicine)  called when the user picks a medicine         (required)
+//   onSelect(medicine)  called when the user picks a product          (required)
 //   onClear()           called when the user edits the text after a selection
-//   label               field label                      (default "Medicine")
+//   label               field label                (default: the shop's item word)
 //   required            shows the red * on the label     (default false)
 //   error               validation message shown under the input
 //   placeholder         input placeholder
@@ -45,37 +57,25 @@
 //                       when a custom searchFn is passed.
 //   debounceMs          wait after typing before calling API (default 300)
 //   disabled            disable the input
-//   showPrice           show "KES <unit_price>" in results   (default true)
+//   showPrice           show the unit price in results       (default true)
 //   id                  input id (use a unique one if several on one page)
 //   (Built-in search caches the full list for 1 minute and filters it in the
-//    browser. Pages that edit medicines elsewhere should call the exported
-//    clearMedicineCache() afterwards.)
-//   searchFn(query)     async fn returning an array of medicines. Defaults to
-//                       /medicines/autocomplete/. Pass a custom one when a page
-//                       needs different data, e.g. the full medicine list:
-//                         searchFn={async (q) => {
-//                           const d = await getMedicines({ search: q, visible_only: true });
-//                           return d.results ?? d;
-//                         }}
+//    browser. Pages that edit products elsewhere should call the exported
+//    clearProductCache() afterwards.)
+//   searchFn(query)     async fn returning an array of products. Defaults to
+//                       /medicines/autocomplete/.
 //   renderOption(m)     optional. Returns the content of each result row, e.g.
-//                       to show stock levels or generic names.
+//                       to show stock levels or brand names.
 //   editable            set false on a page to turn the edit feature off  (default true)
-//   allowCreate         set false on a page to turn "Add new medicine" off (default true)
+//   allowCreate         set false on a page to turn "Add new" off          (default true)
 //   canEdit             optional override. By default the component works out
 //                       the current user's role itself (one cached /auth/me/ call).
-//   onMedicineUpdated(m) called after a successful edit with the updated medicine
-//   onMedicineCreated(m) called after a new medicine is added (it is also
+//   onProductUpdated(m) called after a successful edit with the updated product
+//   onProductCreated(m) called after a new product is added (it is also
 //                        passed to onSelect, so most pages need nothing extra)
 //
 // To clear the box from the parent (e.g. after saving), change the component's
-// `key`:  <MedicineSearch key={medKey} ... />  then  setMedKey(k => k + 1).
-//
-// Example
-//   <MedicineSearch
-//     required
-//     onSelect={(m) => setForm((f) => ({ ...f, medicine: m.id }))}
-//     onClear={() => setForm((f) => ({ ...f, medicine: "" }))}
-//   />
+// `key`:  <ProductSearch key={medKey} ... />  then  setMedKey(k => k + 1).
 
 import { useState, useEffect, useRef, useMemo } from "react";
 import {
@@ -86,12 +86,79 @@ import {
   getMedicineBranchStock,
   setMedicineStock,
 } from "../services/api";
+import { useShopProfile } from "../utils/shopProfile";
 import Modal from "./Modal";
+// Default picture for products that have no image (src/assets/no_image_available.png)
+import noImage from "../assets/no_image_available.png";
 
-// Roles that may edit/add a medicine (must match MEDICINE_EDIT_ROLES on the backend).
+const MAX_IMAGE_BYTES = 5 * 1024 * 1024;
+
+// Photo chooser used by the add / edit pop-ups (also exported for other pages).
+//   current  existing image URL (edit only)     file     newly chosen File
+//   removed  true when the existing image is being removed
+export function ImagePicker({ current, file, removed = false, onPick, onClear }) {
+  const [preview, setPreview] = useState(null);
+  useEffect(() => {
+    if (!file) {
+      setPreview(null);
+      return undefined;
+    }
+    const url = URL.createObjectURL(file);
+    setPreview(url);
+    return () => URL.revokeObjectURL(url);
+  }, [file]);
+
+  const hasImage = !!(preview || (!removed && current));
+  const src = preview || (!removed && current) || noImage;
+  return (
+    <div className="field">
+      <label className="field-label">Product image</label>
+      <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+        <img
+          src={src}
+          alt=""
+          onError={(e) => {
+            e.currentTarget.onerror = null;
+            e.currentTarget.src = noImage;
+          }}
+          style={{
+            width: 72,
+            height: 72,
+            objectFit: "cover",
+            borderRadius: 8,
+            border: "1px solid var(--border-default)",
+            background: "#fff",
+          }}
+        />
+        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+          <label className="btn btn-outline btn-sm" style={{ cursor: "pointer", margin: 0 }}>
+            {hasImage ? "Change image" : "Upload image"}
+            <input
+              type="file"
+              accept="image/*"
+              hidden
+              onChange={(e) => {
+                const f = e.target.files?.[0];
+                if (f) onPick(f);
+                e.target.value = "";
+              }}
+            />
+          </label>
+          {hasImage && (
+            <button type="button" className="btn btn-outline btn-sm" onClick={onClear}>
+              Remove
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// Roles that may edit/add a product (must match MEDICINE_EDIT_ROLES on the backend).
 const EDIT_ROLES = ["DOCTOR", "NURSE", "PHARMACIST", "SUPER_ADMIN", "GROUP_ADMIN"];
 
-// One shared /auth/me/ lookup for every MedicineSearch on the page.
+// One shared /auth/me/ lookup for every ProductSearch on the page.
 let rolePromise = null;
 const fetchRole = () => {
   if (!rolePromise) {
@@ -105,8 +172,8 @@ const fetchRole = () => {
   return rolePromise;
 };
 
-// For pages that render their own medicine lists and need the same edit rights.
-export function useCanEditMedicine() {
+// For pages that render their own product lists and need the same edit rights.
+export function useCanEditProduct() {
   const [role, setRole] = useState(null);
   useEffect(() => {
     let alive = true;
@@ -119,7 +186,7 @@ export function useCanEditMedicine() {
 }
 
 // ---------------------------------------------------------------------------
-// Medicine list cache (shared by every MedicineSearch on the page).
+// Product list cache (shared by every ProductSearch on the page).
 // The full list is fetched ONCE, then typing filters it in the browser, so
 // there is no server round trip per keystroke. Cached per "include hidden"
 // mode, expires after CACHE_TTL, and is cleared after any edit / add.
@@ -128,7 +195,7 @@ const CACHE_TTL = 60 * 1000; // 1 minute
 const SEARCH_LIMIT = 50; // max rows shown while typing
 const medCache = {}; // key -> { at, list, promise }
 
-export const clearMedicineCache = () => {
+export const clearProductCache = () => {
   Object.keys(medCache).forEach((k) => delete medCache[k]);
 };
 
@@ -148,17 +215,17 @@ const loadFullList = (includeHidden) => {
   return promise;
 };
 
+const matchesQuery = (m, q) =>
+  m.name?.toLowerCase().includes(q) ||
+  m.generic_name?.toLowerCase().includes(q) ||
+  m.barcode?.toLowerCase().includes(q) ||
+  m.sku?.toLowerCase().includes(q);
+
 const defaultSearchFn = async (query, includeHidden) => {
   const list = await loadFullList(includeHidden);
   const q = (query || "").trim().toLowerCase();
   if (!q) return list; // browse mode: everything
-  return list
-    .filter(
-      (m) =>
-        m.name?.toLowerCase().includes(q) ||
-        m.generic_name?.toLowerCase().includes(q)
-    )
-    .slice(0, SEARCH_LIMIT);
+  return list.filter((m) => matchesQuery(m, q)).slice(0, SEARCH_LIMIT);
 };
 
 const isHidden = (m) => m?.is_visible === false;
@@ -190,6 +257,8 @@ const toForm = (m) => ({
   generic_name: m.generic_name ?? "",
   category: m.category ?? "",
   unit: m.unit ?? "",
+  barcode: m.barcode ?? "",
+  sku: m.sku ?? "",
   unit_price: m.unit_price ?? "",
   insurance_price: m.insurance_price ?? "",
   reorder_level: m.reorder_level ?? "",
@@ -205,7 +274,7 @@ const sameNumber = (a, b) => {
 const buildPatch = (original, form) => {
   const o = toForm(original);
   const patch = {};
-  ["name", "generic_name", "category", "unit"].forEach((k) => {
+  ["name", "generic_name", "category", "unit", "barcode", "sku"].forEach((k) => {
     if (form[k].trim() !== String(o[k]).trim()) patch[k] = form[k].trim();
   });
   if (!sameNumber(form.unit_price, o.unit_price)) patch.unit_price = form.unit_price;
@@ -235,11 +304,13 @@ const validateForm = (form) => {
 // ---------------------------------------------------------------------------
 // Add-form helpers
 // ---------------------------------------------------------------------------
-const emptyAddForm = (name = "") => ({
+const emptyAddForm = (name = "", unit = "tablet") => ({
   name,
   generic_name: "",
   category: "",
-  unit: "tablet",
+  unit,
+  barcode: "",
+  sku: "",
   unit_price: "",
   insurance_price: "",
   quantity: "",
@@ -367,12 +438,19 @@ const footerHintStyle = {
 // Edit modal (rendered as a NESTED Modal so it stacks cleanly on top of the
 // parent dialog without hand-rolled portals or z-index juggling).
 // ---------------------------------------------------------------------------
-export function MedicineEditModal({ medicine, onClose, onSaved }) {
+export function ProductEditModal({ medicine, onClose, onSaved }) {
+  const profile = useShopProfile();
+  const cur = profile.currency;
   const [form, setForm] = useState(() => toForm(medicine));
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
 
-  // Stock at the user's own branch (loaded when the modal opens).
+  // Product image: a newly chosen file, or "remove the current one".
+  const [imageFile, setImageFile] = useState(null);
+  const [imageRemoved, setImageRemoved] = useState(false);
+  const imageDirty = !!imageFile || imageRemoved;
+
+  // Stock on hand (loaded when the modal opens).
   const [stock, setStock] = useState("");
   const [origStock, setOrigStock] = useState(null);
   const [stockState, setStockState] = useState("loading"); // loading | ready | error
@@ -408,7 +486,7 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
   const stockDirty =
     stockState === "ready" && !stockError && Number(stock) !== origStock;
 
-  const dirty = patchDirty || stockDirty;
+  const dirty = patchDirty || stockDirty || imageDirty;
   const valid = Object.keys(errors).length === 0 && !stockError;
 
   const set = (key) => (e) => {
@@ -431,14 +509,17 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
     setSaveError("");
     try {
       let result = medicine;
-      if (patchDirty) {
-        const updated = await updateMedicine(medicine.id, patch);
+      if (patchDirty || imageDirty) {
+        const body = { ...patch };
+        if (imageFile) body.image = imageFile;
+        else if (imageRemoved) body.image = null;
+        const updated = await updateMedicine(medicine.id, body);
         result = { ...result, ...updated };
       }
       if (stockDirty) {
         const r = await setMedicineStock(medicine.id, {
           quantity: Number(stock),
-          reason: "Edited from medicine search",
+          reason: "Edited from product search",
         });
         result = { ...result, ...(r?.medicine || {}) };
       }
@@ -481,7 +562,7 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
       nested
       show
       onClose={requestClose}
-      title="Edit medicine"
+      title={`Edit product`}
       size="sm"
       footer={footer}
     >
@@ -499,9 +580,28 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
           {fieldError("name")}
         </div>
 
+        <ImagePicker
+          current={medicine.image}
+          file={imageFile}
+          removed={imageRemoved}
+          onPick={(f) => {
+            if (f.size > MAX_IMAGE_BYTES) {
+              setSaveError("Image must be 5 MB or smaller.");
+              return;
+            }
+            setSaveError("");
+            setImageFile(f);
+            setImageRemoved(false);
+          }}
+          onClear={() => {
+            setImageFile(null);
+            setImageRemoved(true);
+          }}
+        />
+
         <div style={gridStyle}>
           <div className="field">
-            <label className="field-label">Generic name</label>
+            <label className="field-label">{profile.genericLabel}</label>
             <input
               className="input"
               value={form.generic_name}
@@ -520,12 +620,28 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
 
         <div style={gridStyle}>
           <div className="field">
+            <label className="field-label">Barcode</label>
+            <input
+              className="input"
+              value={form.barcode}
+              onChange={set("barcode")}
+              placeholder="Scan or type"
+            />
+          </div>
+          <div className="field">
+            <label className="field-label">SKU / code</label>
+            <input className="input" value={form.sku} onChange={set("sku")} />
+          </div>
+        </div>
+
+        <div style={gridStyle}>
+          <div className="field">
             <label className="field-label">Unit</label>
             <input
               className="input"
               value={form.unit}
               onChange={set("unit")}
-              placeholder="tablet, syrup..."
+              placeholder={profile.unitHint}
             />
           </div>
           <div className="field">
@@ -545,7 +661,7 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
         <div style={gridStyle}>
           <div className="field">
             <label className="field-label">
-              Unit price (KES) <span className="required">*</span>
+              Unit price ({cur}) <span className="required">*</span>
             </label>
             <input
               className="input"
@@ -557,23 +673,25 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
             />
             {fieldError("unit_price")}
           </div>
-          <div className="field">
-            <label className="field-label">Insurance price (KES)</label>
-            <input
-              className="input"
-              type="number"
-              min="0"
-              step="0.01"
-              value={form.insurance_price}
-              onChange={set("insurance_price")}
-              placeholder="Same as unit price"
-            />
-            {fieldError("insurance_price")}
-          </div>
+          {profile.isPharmacy && (
+            <div className="field">
+              <label className="field-label">Insurance price ({cur})</label>
+              <input
+                className="input"
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.insurance_price}
+                onChange={set("insurance_price")}
+                placeholder="Same as unit price"
+              />
+              {fieldError("insurance_price")}
+            </div>
+          )}
         </div>
 
         <div className="field">
-          <label className="field-label">Stock available (this branch)</label>
+          <label className="field-label">Stock available</label>
           <input
             className={`input ${stockError ? "has-error" : ""}`}
             type="number"
@@ -590,8 +708,8 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
           {stockError && <div className="field-error">{stockError}</div>}
           <div className="text-xs text-muted" style={{ marginTop: 4 }}>
             {stockState === "error"
-              ? "Couldn't load stock for this branch, so it can't be edited right now."
-              : "Changing this adjusts your branch's stock. The change is logged so the pharmacist can see it."}
+              ? "Couldn't load the stock for this item, so it can't be edited right now."
+              : "Changing this adjusts your stock. The change is logged so managers can see it."}
           </div>
         </div>
 
@@ -604,10 +722,10 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
             onChange={set("is_visible")}
           />
           <span>
-            <strong>Visible in medicine search</strong>
+            <strong>Visible in product search</strong>
             <span className="text-xs text-muted" style={{ display: "block" }}>
-              Turn off to hide this medicine from pickers so it can't be selected
-              or prescribed.
+              Turn off to hide this product from pickers so it can't be selected
+              or sold.
             </span>
           </span>
         </label>
@@ -623,17 +741,21 @@ export function MedicineEditModal({ medicine, onClose, onSaved }) {
 }
 
 // ---------------------------------------------------------------------------
-// Add-medicine modal: creates the medicine AND its first stock batch.
+// Add modal: creates the product AND its first stock batch.
 // ---------------------------------------------------------------------------
-export function MedicineAddModal({ initialName, onClose, onCreated }) {
-  const initial = useMemo(() => emptyAddForm(initialName), [initialName]);
+export function ProductAddModal({ initialName, onClose, onCreated }) {
+  const profile = useShopProfile();
+  const cur = profile.currency;
+  // Computed once, so the form is not reset if the shop profile arrives while typing.
+  const [initial] = useState(() => emptyAddForm(initialName, profile.defaultUnit));
   const [form, setForm] = useState(initial);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
   const [tried, setTried] = useState(false);
+  const [imageFile, setImageFile] = useState(null);
 
   const errors = validateAdd(form);
-  const dirty = JSON.stringify(form) !== JSON.stringify(initial);
+  const dirty = JSON.stringify(form) !== JSON.stringify(initial) || !!imageFile;
 
   const set = (key) => (e) => {
     setSaveError("");
@@ -642,7 +764,7 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
 
   const requestClose = () => {
     if (saving) return;
-    if (dirty && !window.confirm("Discard this new medicine?")) return;
+    if (dirty && !window.confirm(`Discard this new product?`)) return;
     onClose();
   };
 
@@ -657,17 +779,22 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
         name: form.name.trim(),
         generic_name: form.generic_name.trim(),
         category: form.category.trim(),
-        unit: form.unit.trim() || "tablet",
+        unit: form.unit.trim() || profile.defaultUnit,
+        barcode: form.barcode.trim(),
+        sku: form.sku.trim(),
         unit_price: form.unit_price,
-        insurance_price: form.insurance_price === "" ? null : form.insurance_price,
         quantity: Number(form.quantity),
       };
+      if (profile.isPharmacy) {
+        payload.insurance_price = form.insurance_price === "" ? null : form.insurance_price;
+      }
       if (form.reorder_level !== "") payload.reorder_level = Number(form.reorder_level);
-      if (form.expiry_date) payload.expiry_date = form.expiry_date;
+      if (imageFile) payload.image = imageFile;
+      if (profile.tracksExpiry && form.expiry_date) payload.expiry_date = form.expiry_date;
       const created = await quickAddMedicine(payload);
       onCreated(created);
     } catch (err) {
-      setSaveError(errorText(err, "Could not add the medicine."));
+      setSaveError(errorText(err, `Could not add the product.`));
       setSaving(false);
     }
   };
@@ -701,14 +828,14 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
       nested
       show
       onClose={requestClose}
-      title="Add new medicine"
+      title={`Add new product`}
       size="sm"
       footer={footer}
     >
       <div style={{ display: "grid", gap: "var(--space-3)" }}>
         <div className="text-xs text-muted">
-          This adds the medicine and a stock batch at your branch right away, so
-          you can prescribe it now. The pharmacist can verify the details later.
+          This adds the product and a stock batch right away, so you can
+          sell it now. You can verify the details later.
         </div>
 
         <div className="field">
@@ -724,9 +851,22 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
           {fieldError("name")}
         </div>
 
+        <ImagePicker
+          file={imageFile}
+          onPick={(f) => {
+            if (f.size > MAX_IMAGE_BYTES) {
+              setSaveError("Image must be 5 MB or smaller.");
+              return;
+            }
+            setSaveError("");
+            setImageFile(f);
+          }}
+          onClear={() => setImageFile(null)}
+        />
+
         <div style={gridStyle}>
           <div className="field">
-            <label className="field-label">Generic name</label>
+            <label className="field-label">{profile.genericLabel}</label>
             <input
               className="input"
               value={form.generic_name}
@@ -745,12 +885,28 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
 
         <div style={gridStyle}>
           <div className="field">
+            <label className="field-label">Barcode</label>
+            <input
+              className="input"
+              value={form.barcode}
+              onChange={set("barcode")}
+              placeholder="Scan or type"
+            />
+          </div>
+          <div className="field">
+            <label className="field-label">SKU / code</label>
+            <input className="input" value={form.sku} onChange={set("sku")} />
+          </div>
+        </div>
+
+        <div style={gridStyle}>
+          <div className="field">
             <label className="field-label">Unit</label>
             <input
               className="input"
               value={form.unit}
               onChange={set("unit")}
-              placeholder="tablet, syrup..."
+              placeholder={profile.unitHint}
             />
           </div>
           <div className="field">
@@ -772,7 +928,7 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
         <div style={gridStyle}>
           <div className="field">
             <label className="field-label">
-              Unit price (KES) <span className="required">*</span>
+              Unit price ({cur}) <span className="required">*</span>
             </label>
             <input
               className={`input ${tried && errors.unit_price ? "has-error" : ""}`}
@@ -784,33 +940,37 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
             />
             {fieldError("unit_price")}
           </div>
-          <div className="field">
-            <label className="field-label">Insurance price (KES)</label>
-            <input
-              className="input"
-              type="number"
-              min="0"
-              step="0.01"
-              value={form.insurance_price}
-              onChange={set("insurance_price")}
-              placeholder="Same as unit price"
-            />
-            {fieldError("insurance_price")}
-          </div>
+          {profile.isPharmacy && (
+            <div className="field">
+              <label className="field-label">Insurance price ({cur})</label>
+              <input
+                className="input"
+                type="number"
+                min="0"
+                step="0.01"
+                value={form.insurance_price}
+                onChange={set("insurance_price")}
+                placeholder="Same as unit price"
+              />
+              {fieldError("insurance_price")}
+            </div>
+          )}
         </div>
 
         <div style={gridStyle}>
-          <div className="field">
-            <label className="field-label">Expiry date</label>
-            <input
-              className={`input ${tried && errors.expiry_date ? "has-error" : ""}`}
-              type="date"
-              min={todayStr()}
-              value={form.expiry_date}
-              onChange={set("expiry_date")}
-            />
-            {fieldError("expiry_date")}
-          </div>
+          {profile.tracksExpiry && (
+            <div className="field">
+              <label className="field-label">Expiry date</label>
+              <input
+                className={`input ${tried && errors.expiry_date ? "has-error" : ""}`}
+                type="date"
+                min={todayStr()}
+                value={form.expiry_date}
+                onChange={set("expiry_date")}
+              />
+              {fieldError("expiry_date")}
+            </div>
+          )}
           <div className="field">
             <label className="field-label">Reorder level</label>
             <input
@@ -825,9 +985,11 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
             {fieldError("reorder_level")}
           </div>
         </div>
-        <div className="text-xs text-muted" style={{ marginTop: "calc(var(--space-2) * -1)" }}>
-          Not sure of the expiry? Leave it blank. The pharmacist can update it.
-        </div>
+        {profile.tracksExpiry && (
+          <div className="text-xs text-muted" style={{ marginTop: "calc(var(--space-2) * -1)" }}>
+            Not sure of the expiry? Leave it blank and update it later.
+          </div>
+        )}
 
         {saveError && (
           <div className="field-error" style={{ marginTop: "var(--space-1)" }}>
@@ -842,13 +1004,13 @@ export function MedicineAddModal({ initialName, onClose, onCreated }) {
 // ---------------------------------------------------------------------------
 // Main component
 // ---------------------------------------------------------------------------
-export default function MedicineSearch({
+export default function ProductSearch({
   onSelect,
   onClear,
-  label = "Medicine",
+  label,
   required = false,
   error = "",
-  placeholder = "Click to browse or type to search medicine...",
+  placeholder,
   minChars: minCharsProp,
   debounceMs = 300,
   disabled = false,
@@ -859,9 +1021,15 @@ export default function MedicineSearch({
   editable = true,
   allowCreate = true,
   canEdit,
-  onMedicineUpdated,
-  onMedicineCreated,
+  onProductUpdated,
+  onProductCreated,
 }) {
+  const profile = useShopProfile();
+  const cur = profile.currency;
+  const labelText = label ?? "Product";
+  const placeholderText =
+    placeholder ?? `Click to browse, scan a barcode or type to search product...`;
+
   const [searchTerm, setSearchTerm] = useState("");
   const [results, setResults] = useState([]);
   const [open, setOpen] = useState(false);
@@ -927,7 +1095,7 @@ export default function MedicineSearch({
         setResults(Array.isArray(list) ? list : []);
       } catch (err) {
         if (myId === requestId.current) setResults([]);
-        console.error("Medicine search failed:", err);
+        console.error("Product search failed:", err);
       } finally {
         if (myId === requestId.current) setSearching(false);
       }
@@ -948,12 +1116,36 @@ export default function MedicineSearch({
   };
 
   const handleSelect = (medicine) => {
-    if (isHidden(medicine)) return; // hidden medicines can be edited, never picked
+    if (isHidden(medicine)) return; // hidden products can be edited, never picked
+    // Drop any search that is still waiting so it can't reopen the list.
+    clearTimeout(timer.current);
+    requestId.current += 1;
+    setSearching(false);
     setSelected(medicine);
     setSearchTerm(medicine.name);
     setResults([]);
     setOpen(false);
     onSelect?.(medicine);
+  };
+
+  // Barcode scanners type the code and press Enter: pick an exact barcode / SKU
+  // match (or a single result) straight away, without waiting for the debounce.
+  const handleKeyDown = async (e) => {
+    if (e.key !== "Enter") return;
+    const q = searchTerm.trim().toLowerCase();
+    if (!q || selected) return;
+    e.preventDefault();
+    try {
+      const list = await searchRef.current(searchTerm.trim());
+      const visible = (Array.isArray(list) ? list : []).filter((m) => !isHidden(m));
+      const exact = visible.find(
+        (m) => m.barcode?.toLowerCase() === q || m.sku?.toLowerCase() === q
+      );
+      const pick = exact || (visible.length === 1 ? visible[0] : null);
+      if (pick) handleSelect(pick);
+    } catch (err) {
+      console.error("Product search failed:", err);
+    }
   };
 
   const openEditor = (medicine) => {
@@ -969,7 +1161,7 @@ export default function MedicineSearch({
   };
 
   const handleSaved = (updated) => {
-    clearMedicineCache(); // next open re-fetches fresh prices / stock / visibility
+    clearProductCache(); // next open re-fetches fresh prices / stock / visibility
     setEditing(null);
     setResults((prev) =>
       prev.map((m) => (m.id === updated.id ? { ...m, ...updated } : m))
@@ -985,14 +1177,14 @@ export default function MedicineSearch({
         setSearchTerm(updated.name);
       }
     }
-    onMedicineUpdated?.(updated);
+    onProductUpdated?.(updated);
   };
 
   const handleCreated = (created) => {
-    clearMedicineCache(); // the new medicine must appear in the list
+    clearProductCache(); // the new product must appear in the list
     setAdding(null);
-    handleSelect(created); // pick it straight away so the order can continue
-    onMedicineCreated?.(created);
+    handleSelect(created); // pick it straight away so the sale can continue
+    onProductCreated?.(created);
   };
 
   const longEnough = searchTerm.trim().length >= minChars;
@@ -1008,15 +1200,15 @@ export default function MedicineSearch({
   };
 
   const trimmedTerm = searchTerm.trim();
-  const addLabel = trimmedTerm ? `+ Add "${trimmedTerm}"` : "+ Add new medicine";
+  const addLabel = trimmedTerm ? `+ Add "${trimmedTerm}"` : `+ Add new product`;
   const addFooterLabel = trimmedTerm
-    ? `+ Add "${trimmedTerm}" as new medicine`
-    : "+ Add new medicine";
+    ? `+ Add "${trimmedTerm}" as new product`
+    : `+ Add new product`;
 
   return (
     <div className="field">
       <label className="field-label" htmlFor={id}>
-        {label} {required && <span className="required">*</span>}
+        {labelText} {required && <span className="required">*</span>}
       </label>
 
       <div style={{ position: "relative" }}>
@@ -1025,10 +1217,11 @@ export default function MedicineSearch({
           type="text"
           autoComplete="off"
           className={`input ${error ? "has-error" : ""}`}
-          placeholder={placeholder}
+          placeholder={placeholderText}
           value={searchTerm}
           disabled={disabled}
           onChange={handleInputChange}
+          onKeyDown={handleKeyDown}
           onFocus={() => {
             clearTimeout(blurTimer.current);
             if (selected || !longEnough) return;
@@ -1044,7 +1237,7 @@ export default function MedicineSearch({
 
         {open && searching && results.length === 0 && (
           <div className="text-xs text-muted" style={messageStyle}>
-            {trimmedTerm ? "Searching..." : "Loading medicines..."}
+            {trimmedTerm ? "Searching..." : `Loading products...`}
           </div>
         )}
 
@@ -1059,12 +1252,12 @@ export default function MedicineSearch({
               gap: "var(--space-2)",
             }}
           >
-            <span>No medicines found</span>
+            <span>No products found</span>
             {userCanCreate && (
               <button
                 type="button"
                 style={addBtnStyle}
-                title="Add this as a new medicine"
+                title={`Add this as a new product`}
                 {...addButtonHandlers}
               >
                 {addLabel}
@@ -1087,7 +1280,7 @@ export default function MedicineSearch({
               {!renderOption && (
                 <thead>
                   <tr>
-                    <th style={thStyle}>Medicine</th>
+                    <th style={thStyle}>Product</th>
                     {showPrice && (
                       <th style={{ ...thStyle, textAlign: "right" }}>Price</th>
                     )}
@@ -1139,6 +1332,24 @@ export default function MedicineSearch({
                       ) : (
                         <>
                           <td style={{ ...tdStyle, fontWeight: 600 }}>
+                            <img
+                              src={m.image || noImage}
+                              alt=""
+                              loading="lazy"
+                              onError={(e) => {
+                                e.currentTarget.onerror = null;
+                                e.currentTarget.src = noImage;
+                              }}
+                              style={{
+                                width: 28,
+                                height: 28,
+                                objectFit: "cover",
+                                borderRadius: 6,
+                                marginRight: 8,
+                                verticalAlign: "middle",
+                                border: "1px solid var(--border-default)",
+                              }}
+                            />
                             {m.name}
                             {hidden && <span style={badgeStyle}>Hidden</span>}
                           </td>
@@ -1152,7 +1363,7 @@ export default function MedicineSearch({
                                 fontVariantNumeric: "tabular-nums",
                               }}
                             >
-                              {hasPrice(m) ? `KES ${m.unit_price}` : "—"}
+                              {hasPrice(m) ? `${cur} ${m.unit_price}` : "—"}
                             </td>
                           )}
                         </>
@@ -1169,7 +1380,7 @@ export default function MedicineSearch({
                           <button
                             type="button"
                             style={editBtnStyle}
-                            title="Edit medicine"
+                            title={`Edit product`}
                             // preventDefault keeps focus in the input; stopPropagation stops row selection
                             onMouseDown={(e) => {
                               e.preventDefault();
@@ -1190,12 +1401,12 @@ export default function MedicineSearch({
             {userCanCreate && (
               <div style={addFooterStyle}>
                 <span className="text-xs text-muted">
-                  {results.length} medicine{results.length === 1 ? "" : "s"} · Can't find it?
+                  {results.length} {results.length === 1 ? "product" : "products"} · Can't find it?
                 </span>
                 <button
                   type="button"
                   style={addBtnStyle}
-                  title="Add this as a new medicine"
+                  title={`Add this as a new product`}
                   {...addButtonHandlers}
                 >
                   {addFooterLabel}
@@ -1209,7 +1420,7 @@ export default function MedicineSearch({
       {error && <div className="field-error">{error}</div>}
 
       {editing && (
-        <MedicineEditModal
+        <ProductEditModal
           medicine={editing}
           onClose={() => setEditing(null)}
           onSaved={handleSaved}
@@ -1217,7 +1428,7 @@ export default function MedicineSearch({
       )}
 
       {adding !== null && (
-        <MedicineAddModal
+        <ProductAddModal
           initialName={adding}
           onClose={() => setAdding(null)}
           onCreated={handleCreated}

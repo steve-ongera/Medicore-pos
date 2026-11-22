@@ -1,0 +1,16 @@
+﻿pages\reports\ProductReport.jsx:9: // Revenue share bar (same green as the Dashboard's top-medicines chart)
+pages\reports\ProductReport.jsx:92: <tr key={i.medicine}>
+pages\reports\StockReport.jsx:134: <td className="cell-primary">{b.medicine}</td>
+services\api.js:155: export const getMedicines = (p) => unwrap(api.get(`/medicines/${qs(p)}`));
+services\api.js:156: export const createMedicine = (d) => unwrap(api.post("/medicines/", d));
+services\api.js:157: export const updateMedicine = (id, d) => unwrap(api.patch(`/medicines/${id}/`, d));
+services\api.js:158: export const deleteMedicine = (id) => unwrap(api.delete(`/medicines/${id}/`));
+services\api.js:159: export const getLowStockMedicines = () => unwrap(api.get("/medicines/low-stock/"));
+services\api.js:161: unwrap(api.get(`/medicines/autocomplete/${qs({ q: query, include_hidden: includeHidden ? 1 : "" })}`));
+services\api.js:162: export const quickAddMedicine = (d) => unwrap(api.post("/medicines/quick-add/", d));
+services\api.js:163: export const getMedicineBranchStock = (id) => unwrap(api.get(`/medicines/${id}/branch-stock/`));
+services\api.js:164: export const setMedicineStock = (id, d) => unwrap(api.post(`/medicines/${id}/set-stock/`, d));
+services\api.js:173: export const getMedicineBatches = (p) => unwrap(api.get(`/medicine-batches/${qs(p)}`));
+services\api.js:174: export const createMedicineBatch = (d) => unwrap(api.post("/medicine-batches/", d));
+services\api.js:175: export const updateMedicineBatch = (id, d) => unwrap(api.patch(`/medicine-batches/${id}/`, d));
+services\api.js:176: export const getExpiringBatches = (days = 90) => unwrap(api.get(`/medicine-batches/expiring-soon/${qs({ days })}`));

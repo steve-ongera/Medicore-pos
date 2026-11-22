@@ -1,6 +1,8 @@
 // src/pages/inventory/Inventory.jsx
 // Restyled to match the compact Dashboard / Payments: same metric cards, 8px radius,
-// design-system buttons, inputs, badges, tabs and data-table. Data and behaviour unchanged.
+// design-system buttons, inputs, badges, tabs and data-table.
+// Works for any kind of shop: wording, expiry columns/tab and the pharmacy-only
+// insurance price follow the shop's settings (useShopProfile).
 import { useMemo, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { toast } from "../../context/ToastContext";
@@ -11,6 +13,10 @@ import {
   getSuppliers, quickAddMedicine, searchMedicines, setMedicineStock, updateMedicine,
 } from "../../services/api";
 import { canEditMedicines } from "../../utils/roles";
+import { useShopProfile } from "../../utils/shopProfile";
+import { ImagePicker } from "../../components/ProductSearch";
+// Default picture for products that have no image (src/assets/no_image_available.png)
+import noImage from "../../assets/no_image_available.png";
 import { formatCurrency, formatDate, formatDateTime } from "../../utils/formatters";
 
 // Same compact card styling as the Dashboard (scoped to .inv-compact)
@@ -88,22 +94,33 @@ const EmptyBlock = ({ children }) => <div className="text-center text-tertiary p
 
 export default function Inventory() {
   const { user } = useAuth();
+  const profile = useShopProfile();
+  const { tracksExpiry } = profile;
   const canEdit = canEditMedicines(user?.role);
   const [params, setParams] = useSearchParams();
-  const tab = params.get("tab") || "all";
+  const rawTab = params.get("tab") || "all";
+  // Shops that do not track expiry have no "Expiring" tab.
+  const tab = rawTab === "expiring" && !tracksExpiry ? "all" : rawTab;
   const [search, setSearch] = useState("");
   const [modal, setModal] = useState(null); // {type, medicine?}
 
   const meds = useFetch(() => searchMedicines("", { includeHidden: canEdit }), [canEdit]);
-  const expiring = useFetch(() => getExpiringBatches(90), []);
+  const expiring = useFetch(
+    () => (tracksExpiry ? getExpiringBatches(90) : Promise.resolve([])),
+    [tracksExpiry]
+  );
   const all = meds.data || [];
   const low = all.filter((m) => m.is_visible && m.is_low_stock);
+  const outOfStock = all.filter((m) => m.is_visible && m.current_stock === 0);
   const totalValue = all.reduce((s, m) => s + Number(m.unit_price) * m.current_stock, 0);
 
   const shown = useMemo(() => {
     const base = tab === "low" ? low : all;
     const q = search.trim().toLowerCase();
-    return q ? base.filter((m) => `${m.name} ${m.generic_name} ${m.category}`.toLowerCase().includes(q)) : base;
+    return q
+      ? base.filter((m) =>
+          `${m.name} ${m.generic_name} ${m.category} ${m.barcode || ""} ${m.sku || ""}`.toLowerCase().includes(q))
+      : base;
   }, [all, low, tab, search]);
 
   const done = () => { setModal(null); meds.reload(); expiring.reload(); };
@@ -114,9 +131,13 @@ export default function Inventory() {
 
       <div className="page-header flex items-center justify-between flex-wrap gap-4">
         <div>
-          <div className="page-eyebrow">Pharmacy</div>
+          <div className="page-eyebrow">{profile.businessLabel}</div>
           <h1 className="page-title">Inventory</h1>
-          <p className="page-subtitle">Stock on hand, batches, expiry and every stock movement.</p>
+          <p className="page-subtitle">
+            {tracksExpiry
+              ? "Stock on hand, batches, expiry and every stock movement."
+              : "Stock on hand, batches and every stock movement."}
+          </p>
         </div>
         {canEdit && (
           <div className="page-header__actions">
@@ -124,7 +145,7 @@ export default function Inventory() {
               <i className="bi bi-box-arrow-in-down" aria-hidden="true" /> Receive stock
             </button>
             <button className="btn btn-primary" onClick={() => setModal({ type: "add" })}>
-              <i className="bi bi-plus-lg" aria-hidden="true" /> Add medicine
+              <i className="bi bi-plus-lg" aria-hidden="true" /> Add product
             </button>
           </div>
         )}
@@ -133,20 +154,25 @@ export default function Inventory() {
       {/* ==================== KEY METRICS ==================== */}
       <div className="stat-grid mb-5">
         <MetricCard icon="bi-box-seam" variant="primary" label="Products"
-          value={all.length} sub="medicines in catalogue" />
+          value={all.length} sub={`products in catalogue`} />
         <MetricCard icon="bi-cash-stack" variant="success" label="Stock value"
           value={formatCurrency(totalValue)} sub="at selling price" />
         <MetricCard icon="bi-exclamation-triangle" variant="danger" label="Low / out of stock"
           value={low.length} sub="at or below reorder level" />
-        <MetricCard icon="bi-hourglass-split" variant="warning" label="Expiring soon"
-          value={expiring.data?.length ?? "…"} sub="batches within 90 days" />
+        {tracksExpiry ? (
+          <MetricCard icon="bi-hourglass-split" variant="warning" label="Expiring soon"
+            value={expiring.data?.length ?? "…"} sub="batches within 90 days" />
+        ) : (
+          <MetricCard icon="bi-slash-circle" variant="warning" label="Out of stock"
+            value={outOfStock.length} sub={`products with nothing left`} />
+        )}
       </div>
 
       <div className="inv-tabs">
         <Tabs value={tab} onChange={(k) => setParams({ tab: k })} tabs={[
-          { key: "all", label: "All medicines", count: all.length },
+          { key: "all", label: `All products`, count: all.length },
           { key: "low", label: "Low stock", count: low.length },
-          { key: "expiring", label: "Expiring", count: expiring.data?.length },
+          ...(tracksExpiry ? [{ key: "expiring", label: "Expiring", count: expiring.data?.length }] : []),
           { key: "batches", label: "Batches" },
           ...(canEdit ? [{ key: "ledger", label: "Stock ledger" }] : []),
         ]} />
@@ -155,12 +181,13 @@ export default function Inventory() {
       {(tab === "all" || tab === "low") && (
         <div className="table-wrap">
           <div className="table-toolbar">
-            <h5 className="card-title">{tab === "low" ? "Low Stock" : "All Medicines"}</h5>
+            <h5 className="card-title">{tab === "low" ? "Low Stock" : `All Products`}</h5>
             <div className="inv-filters">
-              <input className="input" placeholder="Search medicine, generic name, category…"
+              <input className="input" placeholder={`Search product, barcode, category…`}
                 value={search} onChange={(e) => setSearch(e.target.value)} />
               <button className="btn btn-secondary" onClick={() => downloadCSV("inventory.csv", shown.map((m) => ({
-                name: m.name, generic: m.generic_name, category: m.category, unit: m.unit,
+                name: m.name, brand_or_generic: m.generic_name, category: m.category, unit: m.unit,
+                barcode: m.barcode, sku: m.sku,
                 price: m.unit_price, stock: m.current_stock, reorder_level: m.reorder_level })))}>
                 <i className="bi bi-download" aria-hidden="true" /> Export CSV
               </button>
@@ -169,12 +196,12 @@ export default function Inventory() {
 
           {meds.loading && !meds.data ? <LoadingBlock label="Loading inventory…" />
             : meds.error ? <ErrorBlock>{meds.error}</ErrorBlock>
-            : shown.length === 0 ? <EmptyBlock>No medicines found.</EmptyBlock> : (
+            : shown.length === 0 ? <EmptyBlock>No products found.</EmptyBlock> : (
               <div className="table-scroll">
                 <table className="data-table">
                   <thead>
                     <tr>
-                      <th>Medicine</th><th>Category</th><th>Unit</th><th className="text-right">Price</th>
+                      <th>Image</th><th>Product</th><th>Category</th><th>Unit</th><th className="text-right">Price</th>
                       <th className="text-right">In stock</th><th className="text-right">Reorder at</th>
                       <th>Status</th>{canEdit && <th />}
                     </tr>
@@ -182,9 +209,19 @@ export default function Inventory() {
                   <tbody>
                     {shown.map((m) => (
                       <tr key={m.id} style={m.is_visible ? undefined : { opacity: 0.55 }}>
+                        <td>
+                          <img
+                            src={m.image || noImage}
+                            alt=""
+                            loading="lazy"
+                            onError={(e) => { e.currentTarget.onerror = null; e.currentTarget.src = noImage; }}
+                            style={{ width: 36, height: 36, objectFit: "cover", borderRadius: 6, border: "1px solid #e6ebf1", background: "#fff" }}
+                          />
+                        </td>
                         <td className="cell-primary">
                           {m.name}
                           {m.generic_name && <div className="cell-sub">{m.generic_name}</div>}
+                          {m.barcode && <div className="cell-sub">Barcode: {m.barcode}</div>}
                         </td>
                         <td>{m.category || "-"}</td>
                         <td>{m.unit}</td>
@@ -212,8 +249,8 @@ export default function Inventory() {
         </div>
       )}
 
-      {tab === "expiring" && <ExpiringTab q={expiring} />}
-      {tab === "batches" && <BatchesTab />}
+      {tab === "expiring" && tracksExpiry && <ExpiringTab q={expiring} />}
+      {tab === "batches" && <BatchesTab tracksExpiry={tracksExpiry} />}
       {tab === "ledger" && canEdit && <LedgerTab />}
 
       {modal?.type === "add" && <AddMedicineModal onClose={() => setModal(null)} onDone={done} />}
@@ -226,6 +263,7 @@ export default function Inventory() {
 
 // ── tabs ─────────────────────────────────────────────────────────────────────
 function expiryBadge(date) {
+  if (!date) return <Badge>No expiry</Badge>;
   const days = Math.ceil((new Date(date) - new Date()) / 86400000);
   if (days < 0) return <Badge tone="danger">Expired {-days}d ago</Badge>;
   if (days <= 30) return <Badge tone="danger">{days}d left</Badge>;
@@ -233,15 +271,16 @@ function expiryBadge(date) {
   return <Badge tone="success">{days}d left</Badge>;
 }
 
-function BatchTable({ rows }) {
+function BatchTable({ rows, tracksExpiry = true }) {
+  const profile = useShopProfile();
   if (!rows?.length) return <EmptyBlock>No batches to show.</EmptyBlock>;
   return (
     <div className="table-scroll">
       <table className="data-table">
         <thead>
           <tr>
-            <th>Medicine</th><th>Batch</th><th>Supplier</th><th className="text-right">Received</th>
-            <th className="text-right">Remaining</th><th>Expiry</th><th>Status</th>
+            <th>Product</th><th>Batch</th><th>Supplier</th><th className="text-right">Received</th>
+            <th className="text-right">Remaining</th>{tracksExpiry && <th>Expiry</th>}<th>Status</th>
           </tr>
         </thead>
         <tbody>
@@ -252,8 +291,12 @@ function BatchTable({ rows }) {
               <td>{b.supplier_name || "-"}</td>
               <td className="cell-numeric">{b.quantity_received}</td>
               <td className="cell-numeric">{b.quantity_remaining}</td>
-              <td className="cell-muted">{formatDate(b.expiry_date)}</td>
-              <td>{b.quantity_remaining > 0 ? expiryBadge(b.expiry_date) : <Badge>Empty</Badge>}</td>
+              {tracksExpiry && <td className="cell-muted">{b.expiry_date ? formatDate(b.expiry_date) : "-"}</td>}
+              <td>
+                {b.quantity_remaining <= 0 ? <Badge>Empty</Badge>
+                  : tracksExpiry ? expiryBadge(b.expiry_date)
+                  : <Badge tone="success">In stock</Badge>}
+              </td>
             </tr>
           ))}
         </tbody>
@@ -269,17 +312,18 @@ const ExpiringTab = ({ q }) => (
   </div>
 );
 
-function BatchesTab() {
+function BatchesTab({ tracksExpiry }) {
   const q = useFetch(() => getMedicineBatches(), []);
   return (
     <div className="table-wrap">
       <div className="table-toolbar"><h5 className="card-title">All Batches</h5></div>
-      {q.loading ? <LoadingBlock /> : <BatchTable rows={q.data} />}
+      {q.loading ? <LoadingBlock /> : <BatchTable rows={q.data} tracksExpiry={tracksExpiry} />}
     </div>
   );
 }
 
 function LedgerTab() {
+  const profile = useShopProfile();
   const [type, setType] = useState("");
   const q = useFetch(() => getStockTransactions({ transaction_type: type }), [type]);
   const tone = { STOCK_IN: "success", STOCK_OUT: "info", ADJUSTMENT: "warning", EXPIRED: "danger" };
@@ -291,7 +335,8 @@ function LedgerTab() {
           <select className="select" value={type} onChange={(e) => setType(e.target.value)} aria-label="Movement type">
             <option value="">All movements</option>
             <option value="STOCK_IN">Stock in</option><option value="STOCK_OUT">Stock out</option>
-            <option value="ADJUSTMENT">Adjustments</option><option value="EXPIRED">Expired</option>
+            <option value="ADJUSTMENT">Adjustments</option>
+            {profile.tracksExpiry && <option value="EXPIRED">Expired</option>}
           </select>
         </div>
       </div>
@@ -300,7 +345,7 @@ function LedgerTab() {
           <table className="data-table">
             <thead>
               <tr>
-                <th>When</th><th>Medicine</th><th>Batch</th><th>Type</th>
+                <th>When</th><th>Product</th><th>Batch</th><th>Type</th>
                 <th className="text-right">Qty</th><th>Reason</th><th>By</th>
               </tr>
             </thead>
@@ -343,41 +388,75 @@ const SubmitButton = ({ busy, disabled, onClick, children }) => (
 );
 
 function AddMedicineModal({ onClose, onDone }) {
-  const [f, setF] = useState({ name: "", generic_name: "", category: "", unit: "tablet", unit_price: "", reorder_level: 20, quantity: "", batch_number: "", expiry_date: "" });
+  const profile = useShopProfile();
+  const { tracksExpiry } = profile;
+  const [f, setF] = useState(() => ({
+    name: "", generic_name: "", category: "", unit: profile.defaultUnit, barcode: "", sku: "",
+    unit_price: "", reorder_level: 20, quantity: "", batch_number: "", expiry_date: "", image: null,
+  }));
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const { busy, run } = useSubmit(() => quickAddMedicine(f), onDone, (m) => `${m.name} added`);
-  const ok = f.name && f.unit_price && f.quantity && f.expiry_date;
+  const { busy, run } = useSubmit(
+    () => quickAddMedicine({ ...f, expiry_date: tracksExpiry && f.expiry_date ? f.expiry_date : null }),
+    onDone, (m) => `${m.name} added`);
+  const ok = f.name && f.unit_price && f.quantity && (!tracksExpiry || f.expiry_date);
   return (
-    <Modal wide title="Add medicine" onClose={onClose}
-      footer={<SubmitButton busy={busy} disabled={!ok} onClick={run}>Add medicine</SubmitButton>}>
+    <Modal wide title={`Add product`} onClose={onClose}
+      footer={<SubmitButton busy={busy} disabled={!ok} onClick={run}>Add product</SubmitButton>}>
       <div className="field-row">
         <FormField label="Name *"><input className="input" value={f.name} onChange={set("name")} autoFocus /></FormField>
-        <FormField label="Generic name"><input className="input" value={f.generic_name} onChange={set("generic_name")} /></FormField>
+        <ImagePicker
+          file={f.image}
+          onPick={(file) => setF({ ...f, image: file })}
+          onClear={() => setF({ ...f, image: null })}
+        />
+        <FormField label={profile.genericLabel}><input className="input" value={f.generic_name} onChange={set("generic_name")} /></FormField>
         <FormField label="Category"><input className="input" value={f.category} onChange={set("category")} /></FormField>
-        <FormField label="Unit"><input className="input" value={f.unit} onChange={set("unit")} /></FormField>
+        <FormField label="Unit"><input className="input" value={f.unit} onChange={set("unit")} placeholder={profile.unitHint} /></FormField>
+        <FormField label="Barcode"><input className="input" value={f.barcode} onChange={set("barcode")} placeholder="Scan or type" /></FormField>
+        <FormField label="SKU / code"><input className="input" value={f.sku} onChange={set("sku")} /></FormField>
         <FormField label="Selling price *"><input className="input" type="number" min="0" value={f.unit_price} onChange={set("unit_price")} /></FormField>
         <FormField label="Reorder level"><input className="input" type="number" min="0" value={f.reorder_level} onChange={set("reorder_level")} /></FormField>
         <FormField label="Opening quantity *"><input className="input" type="number" min="1" value={f.quantity} onChange={set("quantity")} /></FormField>
         <FormField label="Batch number" hint="Auto-generated if empty"><input className="input" value={f.batch_number} onChange={set("batch_number")} /></FormField>
-        <FormField label="Expiry date *"><input className="input" type="date" value={f.expiry_date} onChange={set("expiry_date")} /></FormField>
+        {tracksExpiry && (
+          <FormField label="Expiry date *"><input className="input" type="date" value={f.expiry_date} onChange={set("expiry_date")} /></FormField>
+        )}
       </div>
     </Modal>
   );
 }
 
 function EditMedicineModal({ medicine, onClose, onDone }) {
+  const profile = useShopProfile();
   const [f, setF] = useState({ name: medicine.name, generic_name: medicine.generic_name, category: medicine.category,
-    unit: medicine.unit, unit_price: medicine.unit_price, reorder_level: medicine.reorder_level, is_visible: medicine.is_visible });
+    unit: medicine.unit, barcode: medicine.barcode || "", sku: medicine.sku || "",
+    unit_price: medicine.unit_price, reorder_level: medicine.reorder_level, is_visible: medicine.is_visible });
+  const [imageFile, setImageFile] = useState(null);
+  const [imageRemoved, setImageRemoved] = useState(false);
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
-  const { busy, run } = useSubmit(() => updateMedicine(medicine.id, f), onDone, () => "Medicine updated");
+  const { busy, run } = useSubmit(
+    () => updateMedicine(medicine.id, {
+      ...f,
+      ...(imageFile ? { image: imageFile } : imageRemoved ? { image: null } : {}),
+    }),
+    onDone, () => `Product updated`);
   return (
     <Modal wide title={`Edit ${medicine.name}`} onClose={onClose}
       footer={<SubmitButton busy={busy} onClick={run}>Save changes</SubmitButton>}>
       <div className="field-row">
         <FormField label="Name"><input className="input" value={f.name} onChange={set("name")} /></FormField>
-        <FormField label="Generic name"><input className="input" value={f.generic_name} onChange={set("generic_name")} /></FormField>
+        <ImagePicker
+          current={medicine.image}
+          file={imageFile}
+          removed={imageRemoved}
+          onPick={(file) => { setImageFile(file); setImageRemoved(false); }}
+          onClear={() => { setImageFile(null); setImageRemoved(true); }}
+        />
+        <FormField label={profile.genericLabel}><input className="input" value={f.generic_name} onChange={set("generic_name")} /></FormField>
         <FormField label="Category"><input className="input" value={f.category} onChange={set("category")} /></FormField>
         <FormField label="Unit"><input className="input" value={f.unit} onChange={set("unit")} /></FormField>
+        <FormField label="Barcode"><input className="input" value={f.barcode} onChange={set("barcode")} placeholder="Scan or type" /></FormField>
+        <FormField label="SKU / code"><input className="input" value={f.sku} onChange={set("sku")} /></FormField>
         <FormField label="Selling price"><input className="input" type="number" min="0" value={f.unit_price} onChange={set("unit_price")} /></FormField>
         <FormField label="Reorder level"><input className="input" type="number" min="0" value={f.reorder_level} onChange={set("reorder_level")} /></FormField>
       </div>
@@ -409,18 +488,25 @@ function SetStockModal({ medicine, onClose, onDone }) {
 }
 
 function ReceiveModal({ medicines, onClose, onDone }) {
+  const profile = useShopProfile();
+  const { tracksExpiry } = profile;
   const suppliers = useFetch(() => getSuppliers(), []);
   const [f, setF] = useState({ medicine: "", supplier: "", batch_number: "", quantity_received: "", expiry_date: "" });
   const set = (k) => (e) => setF({ ...f, [k]: e.target.value });
   const { busy, run } = useSubmit(
-    () => createMedicineBatch({ ...f, supplier: f.supplier || null, quantity_received: Number(f.quantity_received) }),
+    () => createMedicineBatch({
+      ...f,
+      supplier: f.supplier || null,
+      quantity_received: Number(f.quantity_received),
+      expiry_date: tracksExpiry && f.expiry_date ? f.expiry_date : null,
+    }),
     onDone, () => "Stock received");
-  const ok = f.medicine && f.batch_number && f.quantity_received && f.expiry_date;
+  const ok = f.medicine && f.batch_number && f.quantity_received && (!tracksExpiry || f.expiry_date);
   return (
     <Modal wide title="Receive stock" onClose={onClose}
       footer={<SubmitButton busy={busy} disabled={!ok} onClick={run}>Receive</SubmitButton>}>
       <div className="field-row">
-        <FormField label="Medicine *">
+        <FormField label={`Product *`}>
           <select className="select" value={f.medicine} onChange={set("medicine")}>
             <option value="">Select…</option>
             {medicines.map((m) => <option key={m.id} value={m.id}>{m.name}</option>)}
@@ -434,7 +520,9 @@ function ReceiveModal({ medicines, onClose, onDone }) {
         </FormField>
         <FormField label="Batch number *"><input className="input" value={f.batch_number} onChange={set("batch_number")} /></FormField>
         <FormField label="Quantity *"><input className="input" type="number" min="1" value={f.quantity_received} onChange={set("quantity_received")} /></FormField>
-        <FormField label="Expiry date *"><input className="input" type="date" value={f.expiry_date} onChange={set("expiry_date")} /></FormField>
+        {tracksExpiry && (
+          <FormField label="Expiry date *"><input className="input" type="date" value={f.expiry_date} onChange={set("expiry_date")} /></FormField>
+        )}
       </div>
     </Modal>
   );

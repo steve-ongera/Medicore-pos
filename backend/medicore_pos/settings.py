@@ -1,6 +1,7 @@
 # medicore_pos/settings.py  (SaaS-hardened)
 # Required env vars in production: DJANGO_SECRET_KEY, DJANGO_ALLOWED_HOSTS, CORS_ORIGINS,
-# DB_NAME / DB_USER / DB_PASSWORD (Postgres), MPESA_* , MPESA_CALLBACK_TOKEN, PUBLIC_API_URL.
+# DB_NAME / DB_USER / DB_PASSWORD (Postgres), MPESA_* , MPESA_CALLBACK_TOKEN, PUBLIC_API_URL,
+# EMAIL_HOST_USER / EMAIL_HOST_PASSWORD / DEFAULT_FROM_EMAIL (password-reset emails).
 # For local development set DJANGO_DEBUG=1 and the defaults below are used.
 import os
 from datetime import timedelta
@@ -78,7 +79,15 @@ REST_FRAMEWORK = {
     "DEFAULT_AUTHENTICATION_CLASSES": ["api.tenant_auth.TenantJWTAuthentication"],
     "DEFAULT_PERMISSION_CLASSES": ["rest_framework.permissions.IsAuthenticated"],
     "DEFAULT_THROTTLE_CLASSES": ["rest_framework.throttling.UserRateThrottle"],
-    "DEFAULT_THROTTLE_RATES": {"user": "600/min", "anon": "30/min", "login": "10/min", "register": "5/hour"},
+    "DEFAULT_THROTTLE_RATES": {
+        "user": "600/min",
+        "anon": "30/min",
+        "login": "10/min",
+        "register": "5/hour",
+        "lookup": "120/min",  # sign-up form: username suggestions + availability checks
+        "forgot_password": "5/hour",  # "send me a code" requests (per IP)
+        "reset_code": "30/hour",  # verify-code + reset-password attempts (per IP)
+    },
     "NUM_PROXIES": 1,  # number of reverse proxies (nginx) in front of Django
 }
 SIMPLE_JWT = {
@@ -87,6 +96,23 @@ SIMPLE_JWT = {
     "ROTATE_REFRESH_TOKENS": True,  # api.js already stores the new refresh token
     "BLACKLIST_AFTER_ROTATION": True,
 }
+
+# ---------------------------------------------------------------------------
+# Email (password-reset codes)
+#   Development (DEBUG): the code is printed in the runserver console.
+#   Production: real SMTP, configured through environment variables.
+# ---------------------------------------------------------------------------
+if DEBUG:
+    EMAIL_BACKEND = os.environ.get("EMAIL_BACKEND", "django.core.mail.backends.console.EmailBackend")
+else:
+    EMAIL_BACKEND = "django.core.mail.backends.smtp.EmailBackend"
+EMAIL_HOST = os.environ.get("EMAIL_HOST", "smtp.gmail.com")
+EMAIL_PORT = int(os.environ.get("EMAIL_PORT", "587"))
+EMAIL_USE_TLS = os.environ.get("EMAIL_USE_TLS", "1") == "1"
+EMAIL_HOST_USER = os.environ.get("EMAIL_HOST_USER", "")
+EMAIL_HOST_PASSWORD = os.environ.get("EMAIL_HOST_PASSWORD", "")
+DEFAULT_FROM_EMAIL = os.environ.get("DEFAULT_FROM_EMAIL", "Cloud 360 POS <no-reply@localhost>")
+EMAIL_TIMEOUT = 15  # seconds; a dead mail server must not hang the request
 
 # Production hardening
 SECURE_SSL_REDIRECT = SESSION_COOKIE_SECURE = CSRF_COOKIE_SECURE = not DEBUG

@@ -7,7 +7,7 @@ const REPORTS = [
   { to: "/reports/sales", icon: "bi-graph-up-arrow", variant: "primary", title: "Sales report",
     text: "Revenue by day, payment method and cashier, with discounts and unpaid balances." },
   { to: "/reports/products", icon: "bi-capsule", variant: "success", title: "Product performance",
-    text: "Best and slowest sellers - quantity and revenue per medicine." },
+    text: "Best and slowest sellers - quantity and revenue per product." },
   { to: "/reports/stock", icon: "bi-box-seam", variant: "warning", title: "Stock & expiry",
     text: "Stock value, low / out-of-stock items and batches nearing expiry." },
 ];

@@ -1,4 +1,4 @@
-// src/services/api.js  -  Medicore POS API client
+// src/services/api.js  -  Cloud 360 POS API client
 import axios from "axios";
 
 const BASE_URL = import.meta.env.VITE_API_URL || "http://localhost:8000/api";
@@ -36,13 +36,21 @@ const flush = (err, token) => {
   waiters = [];
 };
 
+// Public auth endpoints: a 401 here must never trigger a token refresh / redirect.
+const AUTH_PATHS = [
+  "/auth/login/",
+  "/auth/refresh/",
+  "/auth/register/",
+  "/auth/forgot-password/",
+  "/auth/verify-reset-code/",
+  "/auth/reset-password/",
+];
+
 api.interceptors.response.use(
   (res) => res,
   async (error) => {
     const original = error.config;
-    const isAuthCall = original?.url?.includes("/auth/login/") ||
-      original?.url?.includes("/auth/refresh/") ||
-      original?.url?.includes("/auth/register/");
+    const isAuthCall = AUTH_PATHS.some((p) => original?.url?.includes(p));
 
     if (error.response?.status === 401 && !original._retry && !isAuthCall && getRefresh()) {
       if (refreshing) {
@@ -106,9 +114,47 @@ const qs = (params = {}) => {
   return s ? `?${s}` : "";
 };
 
+// ── multipart helpers (product images) ───────────────────────────────────────
+// JSON cannot carry a File: it serialises to {} and DRF answers
+// "image: The submitted data was not a file". So whenever the body has a File
+// (or image: null, meaning "remove the picture") we send multipart/form-data.
+const hasImagePayload = (d = {}) =>
+  d.image instanceof File ||
+  (Object.prototype.hasOwnProperty.call(d, "image") && d.image === null);
+
+const toFormData = (d) => {
+  const fd = new FormData();
+  Object.entries(d).forEach(([k, v]) => {
+    if (v === undefined) return;
+    if (k === "image") {
+      // File -> upload; null -> "" which DRF reads as "clear the image"
+      fd.append("image", v instanceof File ? v : "");
+    } else if (v === null) {
+      fd.append(k, ""); // DRF turns "" into None for nullable fields (e.g. insurance_price)
+    } else if (typeof v === "boolean") {
+      fd.append(k, v ? "true" : "false");
+    } else {
+      fd.append(k, v);
+    }
+  });
+  return fd;
+};
+
+// Axios/browser add the multipart boundary themselves; never build it by hand.
+const sendProduct = (method, url, d) =>
+  hasImagePayload(d)
+    ? api({ method, url, data: toFormData(d), headers: { "Content-Type": "multipart/form-data" } })
+    : api({ method, url, data: d });
+
 // ── Auth ─────────────────────────────────────────────────────────────────────
-export const login = async (username, password) => {
-  const data = await unwrap(api.post("/auth/login/", { username, password }));
+// Sign in with EMAIL + password. If the identifier has no "@" it is sent as a
+// username instead, so staff accounts created without an email can still sign in.
+export const login = async (identifier, password) => {
+  const id = (identifier || "").trim();
+  const body = id.includes("@")
+    ? { email: id.toLowerCase(), password }
+    : { username: id, password };
+  const data = await unwrap(api.post("/auth/login/", body));
   setTokens(data);
   localStorage.setItem("user", JSON.stringify(data.user));
   return data;
@@ -120,6 +166,15 @@ export const registerShop = async (payload) => {
   localStorage.setItem("user", JSON.stringify(data.user));
   return data;
 };
+
+// Sign-up helpers (public endpoints, no token needed).
+// -> { suggestions: ["jane.doe", "janedoe", "jane_doe", ...] }  (all currently free)
+export const suggestUsernames = ({ first_name = "", last_name = "", seed = "" } = {}) =>
+  unwrap(api.get(`/auth/username-suggestions/${qs({ first_name, last_name, seed })}`));
+// -> { valid: bool, available: bool, detail: string }
+export const checkUsername = (username) =>
+  unwrap(api.get(`/auth/check-username/${qs({ username })}`));
+
 export const logout = async () => {
   try {
     await api.post("/auth/logout/", { refresh: getRefresh() });
@@ -131,6 +186,17 @@ export const logout = async () => {
 export const getMe = () => unwrap(api.get("/auth/me/"));
 export const updateMe = (d) => unwrap(api.patch("/auth/me/", d));
 export const changePassword = (payload) => unwrap(api.post("/auth/change-password/", payload));
+
+// ── Forgot password (public endpoints, no token needed) ──────────────────────
+// 1. forgotPassword   - email or username -> a 6-digit code is emailed (always answers 200)
+// 2. verifyResetCode  - checks the code without using it
+// 3. resetPassword    - checks the code again and sets the new password
+export const forgotPassword = (identifier) =>
+  unwrap(api.post("/auth/forgot-password/", { identifier }));
+export const verifyResetCode = (identifier, code) =>
+  unwrap(api.post("/auth/verify-reset-code/", { identifier, code }));
+export const resetPassword = ({ identifier, code, new_password }) =>
+  unwrap(api.post("/auth/reset-password/", { identifier, code, new_password }));
 
 // ── Shop, subscription, dashboard/report data ────────────────────────────────
 export const getShop = () => unwrap(api.get("/shop/"));
@@ -151,15 +217,15 @@ export const createUser = (d) => unwrap(api.post("/users/", d));
 export const updateUser = (id, d) => unwrap(api.patch(`/users/${id}/`, d));
 export const deleteUser = (id) => unwrap(api.delete(`/users/${id}/`));
 
-// ── Medicines ────────────────────────────────────────────────────────────────
+// ── Products ────────────────────────────────────────────────────────────────
 export const getMedicines = (p) => unwrap(api.get(`/medicines/${qs(p)}`));
-export const createMedicine = (d) => unwrap(api.post("/medicines/", d));
-export const updateMedicine = (id, d) => unwrap(api.patch(`/medicines/${id}/`, d));
+export const createMedicine = (d) => unwrap(sendProduct("post", "/medicines/", d));
+export const updateMedicine = (id, d) => unwrap(sendProduct("patch", `/medicines/${id}/`, d));
 export const deleteMedicine = (id) => unwrap(api.delete(`/medicines/${id}/`));
 export const getLowStockMedicines = () => unwrap(api.get("/medicines/low-stock/"));
 export const searchMedicines = (query = "", { includeHidden = false } = {}) =>
   unwrap(api.get(`/medicines/autocomplete/${qs({ q: query, include_hidden: includeHidden ? 1 : "" })}`));
-export const quickAddMedicine = (d) => unwrap(api.post("/medicines/quick-add/", d));
+export const quickAddMedicine = (d) => unwrap(sendProduct("post", "/medicines/quick-add/", d));
 export const getMedicineBranchStock = (id) => unwrap(api.get(`/medicines/${id}/branch-stock/`));
 export const setMedicineStock = (id, d) => unwrap(api.post(`/medicines/${id}/set-stock/`, d));
 
@@ -214,7 +280,7 @@ export const getUnreadNotifications = () => unwrap(api.get("/notifications/unrea
 export const getNotificationUnreadCount = () => unwrap(api.get("/notifications/unread-count/"));
 export const markNotificationRead = (id) => unwrap(api.post(`/notifications/${id}/mark-read/`));
 export const markAllNotificationsRead = () => unwrap(api.post("/notifications/mark-all-read/"));
- 
+
 // ── Messages (staff chat) ────────────────────────────────────────────────────
 export const getConversations = () => unwrap(api.get("/conversations/"));
 export const getConversation = (id) => unwrap(api.get(`/conversations/${id}/`));
@@ -227,7 +293,6 @@ export const sendConversationMessage = (id, body) =>
 export const markConversationRead = (id) => unwrap(api.post(`/conversations/${id}/read/`));
 export const getUnreadMessageCount = () => unwrap(api.get("/messages/unread-count/"));
 export const getChatUsers = (p) => unwrap(api.get(`/chat/users/${qs(p)}`));
- 
 
 export const payForBundle = ({ phone, bundle, quantity = 1 }) =>
   unwrap(api.post("/billing/topup/", { phone, bundle, quantity }));

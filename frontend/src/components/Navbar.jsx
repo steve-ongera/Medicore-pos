@@ -1,4 +1,6 @@
 // src/components/Navbar.jsx
+// The current page is shown as the title (like "Overview" in the reference);
+// parent crumbs sit before it in a lighter weight and are hidden on small screens.
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext.jsx";
@@ -9,7 +11,6 @@ import PageSearch from "./PageSearch.jsx";
 import useFullscreen from "../hooks/useFullscreen.js";
 import { useUnreadCounts } from "../utils/unreadCounts.js";
 
-const MIN_CRUMB_WIDTH = 160;
 const UUID_RE = /^[0-9a-f]{8}(-?[0-9a-f]{4}){3}-?[0-9a-f]{12}$/i;
 const decode = (s) => { try { return decodeURIComponent(s); } catch { return s; } };
 const label = (s) => {
@@ -36,9 +37,6 @@ export default function Navbar({ onToggleSidebar }) {
   const [loggingOut, setLoggingOut] = useState(false);
   const menuRef = useRef(null);
 
-  const crumbsRef = useRef(null);
-  const [crumbsFit, setCrumbsFit] = useState(true);
-
   const { isFullscreen, wantsFullscreen, enter, toggle } = useFullscreen();
   // Fullscreen API is missing on iPhone and pointless on phones
   const canFullscreen =
@@ -50,7 +48,7 @@ export default function Navbar({ onToggleSidebar }) {
     ? segments.map((s, i) => ({ label: label(s), full: decode(s), to: "/" + segments.slice(0, i + 1).join("/") }))
     : [{ label: "Dashboard", full: "Dashboard", to: "/dashboard" }];
 
-  // Browser tab title, e.g. "(3) Medicore POS", so new messages and alerts are noticed
+  // Browser tab title, e.g. "(3) Cloud 360 POS", so new messages and alerts are noticed
   // while staff work in another tab.
   useEffect(() => {
     const base = document.title.replace(/^\(\d+\+?\)\s*/, "");
@@ -58,16 +56,6 @@ export default function Navbar({ onToggleSidebar }) {
     document.title = total > 0 ? `(${total > 99 ? "99+" : total}) ${base}` : base;
     return () => { document.title = base; };
   }, [unreadNotifications, unreadMessages]);
-
-  useEffect(() => {
-    const el = crumbsRef.current;
-    if (!el || typeof ResizeObserver === "undefined") return undefined;
-    const check = () => setCrumbsFit(el.clientWidth >= MIN_CRUMB_WIDTH);
-    check();
-    const ro = new ResizeObserver(check);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, []);
 
   useEffect(() => {
     if (!menuOpen) return undefined;
@@ -108,10 +96,9 @@ export default function Navbar({ onToggleSidebar }) {
       <header className="navbar">
         <div className="navbar__left">
           <button type="button" className="navbar__toggle" onClick={onToggleSidebar} aria-label="Toggle sidebar">
-            <i className="bi bi-list" style={{ fontSize: 22 }} aria-hidden="true" />
+            <i className="bi bi-list" style={{ fontSize: "1.375rem" }} aria-hidden="true" />
           </button>
-          <nav ref={crumbsRef} className={`navbar__breadcrumbs${crumbsFit ? "" : " is-hidden"}`}
-            aria-label="Breadcrumb" aria-hidden={!crumbsFit}>
+          <nav className="navbar__breadcrumbs" aria-label="Breadcrumb">
             {crumbs.map((c, i) => (
               <span key={c.to} className="navbar__crumb">
                 {i > 0 && <i className="bi bi-chevron-right navbar__crumb-sep" aria-hidden="true" />}
@@ -135,7 +122,7 @@ export default function Navbar({ onToggleSidebar }) {
               aria-label={isFullscreen ? "Exit fullscreen" : "Enter fullscreen"}
               title={isFullscreen ? "Exit fullscreen (Esc)" : "Enter fullscreen"} onClick={toggle}>
               <i className={`bi ${isFullscreen ? "bi-fullscreen-exit" : "bi-arrows-fullscreen"}`}
-                style={{ fontSize: 17 }} aria-hidden="true" />
+                style={{ fontSize: "1.0625rem" }} aria-hidden="true" />
             </button>
           )}
 
@@ -152,7 +139,7 @@ export default function Navbar({ onToggleSidebar }) {
                 <span className="navbar__user-name">{name}</span>
                 <span className="navbar__user-role">{roleLabel}</span>
               </span>
-              <i className="bi bi-chevron-down text-faint" style={{ fontSize: 11 }} aria-hidden="true" />
+              <i className="bi bi-chevron-down text-faint" style={{ fontSize: "0.6875rem" }} aria-hidden="true" />
             </button>
 
             {menuOpen && (

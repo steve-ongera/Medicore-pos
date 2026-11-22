@@ -144,7 +144,7 @@ export default function Suppliers() {
         <div>
           <div className="page-eyebrow">Pharmacy</div>
           <h1 className="page-title">Suppliers</h1>
-          <p className="page-subtitle">Manage medicine suppliers and contacts</p>
+          <p className="page-subtitle">Manage product suppliers and contacts</p>
         </div>
         <div className="page-header__actions">
           <button className="btn btn-primary" onClick={openCreateForm}>

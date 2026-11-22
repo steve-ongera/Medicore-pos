@@ -24,8 +24,18 @@ export function AuthProvider({ children }) {
       .finally(() => setLoading(false));
   }, []);
 
-  const login = useCallback(async (username, password) => {
-    const data = await API.login(username, password);
+  // `identifier` is the email (preferred). A value without "@" is treated as a
+  // username so staff accounts created without an email can still sign in.
+  const login = useCallback(async (identifier, password) => {
+    const data = await API.login(identifier, password);
+    setUser(data.user);
+    return data.user;
+  }, []);
+
+  // Self-service sign-up. API.registerShop posts to /auth/register/, stores the
+  // tokens + user (creates the shop, owner and free trial), and returns { user, ... }.
+  const register = useCallback(async (payload) => {
+    const data = await API.registerShop(payload);
     setUser(data.user);
     return data.user;
   }, []);
@@ -41,7 +51,9 @@ export function AuthProvider({ children }) {
   }, []);
 
   return (
-    <AuthCtx.Provider value={{ user, loading, login, logout, refreshUser, isAuthenticated: !!user }}>
+    <AuthCtx.Provider
+      value={{ user, loading, login, register, logout, refreshUser, isAuthenticated: !!user }}
+    >
       {children}
     </AuthCtx.Provider>
   );

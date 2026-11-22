@@ -1,6 +1,6 @@
 /**
  * ============================================================================
- * Medicore POS — Application routes  (src/App.jsx)
+ * Cloud 360 POS — Application routes  (src/App.jsx)
  * ============================================================================
  *
  * Same layout as the HMIS App.jsx: imports grouped by module, an `allow()`
@@ -36,6 +36,7 @@ import { ROLES } from "./utils/roles.js";
 // ---------------------------------------------------------------------------
 import Login from "./pages/auth/Login.jsx";
 import Register from "./pages/auth/Register.jsx";
+import ForgotPassword from "./pages/auth/ForgotPassword.jsx";
 import Unauthorized from "./pages/auth/Unauthorized.jsx";
 import NotFound from "./pages/NotFound.jsx";
 import Profile from "./pages/profile/Profile.jsx";
@@ -123,6 +124,7 @@ export default function App() {
       <Route element={<AuthLayout />}>
         <Route path="/login" element={<Login />} />
         <Route path="/register" element={<Register />} />
+        <Route path="/forgot-password" element={<ForgotPassword />} />
         <Route path="/unauthorized" element={<Unauthorized />} />
       </Route>
 

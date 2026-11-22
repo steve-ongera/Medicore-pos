@@ -1,14 +1,21 @@
-// src/pages/Login.jsx
+// src/pages/auth/Login.jsx
+// Split-card sign-in (POSLINE-style). Logic is unchanged: same useAuth().login,
+// redirect and error handling.
 import { useState } from "react";
-import { useNavigate } from "react-router-dom";
-import { login } from "../services/api";
+import { Link, Navigate, useLocation, useNavigate } from "react-router-dom";
+import { useAuth } from "../../context/AuthContext.jsx";
+import AuthShell, { PasswordField } from "../../components/AuthShell.jsx";
 
 export default function Login() {
+  const { login, user } = useAuth();
   const nav = useNavigate();
+  const location = useLocation();
   const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
+
+  if (user) return <Navigate to="/dashboard" replace />;
 
   const submit = async (e) => {
     e.preventDefault();
@@ -16,7 +23,7 @@ export default function Login() {
     setError("");
     try {
       await login(username, password);
-      nav("/pos", { replace: true });
+      nav(location.state?.from?.pathname || "/dashboard", { replace: true });
     } catch (err) {
       setError(err.message);
     } finally {
@@ -25,34 +32,56 @@ export default function Login() {
   };
 
   return (
-    <div style={{ minHeight: "100vh", display: "grid", placeItems: "center", background: "#f4f6f8" }}>
-      <form
-        onSubmit={submit}
-        style={{ width: 340, background: "#fff", padding: 28, borderRadius: 12, boxShadow: "0 4px 24px rgba(0,0,0,.08)" }}
-      >
-        <h2 style={{ margin: "0 0 4px" }}>Medicore POS</h2>
-        <p style={{ margin: "0 0 20px", color: "#666", fontSize: 14 }}>Sign in to continue</p>
-        <input
-          placeholder="Username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          autoFocus
-          required
-          style={{ width: "100%", padding: 10, marginBottom: 10, boxSizing: "border-box" }}
-        />
-        <input
-          type="password"
-          placeholder="Password"
+    <AuthShell
+      title="Log in"
+      subtitle="Welcome back! Please enter your details."
+      footer={<>Don&apos;t have an account? <Link to="/register">Create your shop account</Link></>}
+    >
+      <form onSubmit={submit}>
+        <div className="field">
+          <label className="field-label" htmlFor="username">Username</label>
+          <div className="input-icon-wrap">
+            <i className="bi bi-person icon" aria-hidden="true" />
+            <input
+              id="username"
+              type="text"
+              className="input"
+              placeholder="Enter your username"
+              value={username}
+              onChange={(e) => setUsername(e.target.value)}
+              disabled={busy}
+              autoComplete="username"
+              autoFocus
+              required
+            />
+          </div>
+        </div>
+
+        <PasswordField
+          id="password"
           value={password}
           onChange={(e) => setPassword(e.target.value)}
-          required
-          style={{ width: "100%", padding: 10, marginBottom: 10, boxSizing: "border-box" }}
+          disabled={busy}
         />
-        {error && <div style={{ color: "#c0392b", fontSize: 13, marginBottom: 10 }}>{error}</div>}
-        <button disabled={busy} style={{ width: "100%", padding: 10, cursor: "pointer" }}>
-          {busy ? "Signing in…" : "Sign in"}
+
+        {error && (
+          <div className="alert alert-danger" role="alert" style={{ marginBottom: "var(--space-5)" }}>
+            <i className="bi bi-exclamation-circle alert-icon" aria-hidden="true" />
+            <div className="alert-message">{error}</div>
+          </div>
+        )}
+
+        <button type="submit" className="btn btn-primary btn-block btn-lg" disabled={busy}>
+          {busy ? (
+            <>
+              <span className="spinner spinner-inverse" style={{ width: "1rem", height: "1rem" }} aria-hidden="true" />
+              Signing in...
+            </>
+          ) : (
+            "Sign in"
+          )}
         </button>
       </form>
-    </div>
+    </AuthShell>
   );
 }

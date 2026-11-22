@@ -57,6 +57,7 @@ class BaseModel(models.Model):
         self.save(update_fields=["is_deleted", "deleted_at"])
 
 
+
 # ---------------------------------------------------------------------------
 # 2. Accounts
 # ---------------------------------------------------------------------------
@@ -85,6 +86,22 @@ class User(AbstractUser):
         return f"{self.get_full_name() or self.username} ({self.role})"
 
 
+class PasswordResetCode(models.Model):
+    """One emailed OTP. Only a keyed hash of the code is stored, never the code itself."""
+
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    user = models.ForeignKey("api.User", on_delete=models.CASCADE, related_name="reset_codes")
+    code_hash = models.CharField(max_length=64)
+    attempts = models.PositiveSmallIntegerField(default=0)
+    is_used = models.BooleanField(default=False)
+    created_at = models.DateTimeField(auto_now_add=True)
+    expires_at = models.DateTimeField()
+
+    class Meta:
+        db_table = "password_reset_codes"
+        ordering = ["-created_at"]
+
+        
 class PaymentMethod(models.TextChoices):
     CASH = "CASH", "Cash"
     MPESA = "MPESA", "M-Pesa"
@@ -120,6 +137,7 @@ class Medicine(BaseModel):
     reorder_level = models.PositiveIntegerField(default=20)
     barcode = models.CharField(max_length=64, blank=True, db_index=True)
     sku = models.CharField(max_length=60, blank=True)
+    image = models.ImageField(upload_to="products/", null=True, blank=True)  # NEW
     is_visible = models.BooleanField(
         default=True, help_text="When False, hidden from the POS grid and pickers (editors can still un-hide it)."
     )

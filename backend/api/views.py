@@ -1,6 +1,7 @@
 # api/views.py
 import base64
 import hmac
+import logging
 import re
 import secrets
 from datetime import timedelta, datetime
@@ -8,9 +9,10 @@ from decimal import Decimal, InvalidOperation
 
 from django.conf import settings
 from django.contrib.auth import authenticate, get_user_model
+from django.core.mail import send_mail
 from django.db import transaction
 from django.db.models import Count, DecimalField, ExpressionWrapper, F, Q, Sum, Value
-from django.db.models.functions import Greatest, TruncDate
+from django.db.models.functions import Greatest, Lower, TruncDate
 from django.utils import timezone
 from django.utils.text import slugify
 from rest_framework import status, viewsets
@@ -19,19 +21,13 @@ from rest_framework.decorators import (
 )
 from rest_framework.exceptions import APIException, PermissionDenied, ValidationError
 from rest_framework.permissions import AllowAny, IsAuthenticated
+from rest_framework.parsers import FormParser, JSONParser, MultiPartParser
 from rest_framework.throttling import AnonRateThrottle
 from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 
-from django.contrib.auth import get_user_model
-from django.db.models import Q
 from django.shortcuts import get_object_or_404
-from django.utils import timezone
-from rest_framework import serializers, viewsets
-from rest_framework.decorators import action, api_view, permission_classes
-from rest_framework.exceptions import ValidationError
-from rest_framework.permissions import IsAuthenticated
-from rest_framework.response import Response
+from rest_framework import serializers
 
 from api.models import (
     Medicine,
@@ -39,6 +35,7 @@ from api.models import (
     OTCSale,
     OTCSaleAmendment,
     OTCSaleItem,
+    PasswordResetCode,
     Role,
     ShopSettings,
     StockTransaction,
@@ -74,6 +71,7 @@ from api.serializers import (
     OTCSaleSerializer,
     QuickAddMedicineSerializer,
     RegisterSerializer,
+    ResetPasswordSerializer,
     SetMedicineStockSerializer,
     ShopSettingsSerializer,
     StockTransactionSerializer,
@@ -87,6 +85,7 @@ from api.tenancy import platform_context, tenant_context
 from api.utils import generate_qr_code
 
 User = get_user_model()
+logger = logging.getLogger(__name__)
 
 
 class LoginThrottle(AnonRateThrottle):
@@ -95,6 +94,21 @@ class LoginThrottle(AnonRateThrottle):
 
 class RegisterThrottle(AnonRateThrottle):
     scope = "register"
+
+
+class LookupThrottle(AnonRateThrottle):
+    """Public username checks / suggestions on the sign-up form (needs a "lookup" rate in settings)."""
+    scope = "lookup"
+
+
+class ForgotPasswordThrottle(AnonRateThrottle):
+    """"Send me a reset code" requests (needs a "forgot_password" rate in settings)."""
+    scope = "forgot_password"
+
+
+class ResetCodeThrottle(AnonRateThrottle):
+    """Verify-code and reset-password attempts (needs a "reset_code" rate in settings)."""
+    scope = "reset_code"
 
 
 # ---------------------------------------------------------------------------
@@ -113,12 +127,23 @@ class OutOfStockError(APIException):
 @permission_classes([AllowAny])
 @throttle_classes([LoginThrottle])
 def login_view(request):
-    username = request.data.get("username", "")
+    """Sign in with {"email", "password"}. {"username", "password"} still works for
+    staff accounts that were created without an email."""
+    email = (request.data.get("email") or "").strip()
+    username = (request.data.get("username") or "").strip()
     password = request.data.get("password", "")
+    user = None
     with platform_context():  # nobody is signed in yet, so no tenant exists
-        user = authenticate(request, username=username, password=password)
+        if email:
+            # Emails are not unique at the DB level (older/staff accounts), so try each match.
+            for cand in User.objects.filter(email__iexact=email, is_active=True):
+                user = authenticate(request, username=cand.username, password=password)
+                if user:
+                    break
+        elif username:
+            user = authenticate(request, username=username, password=password)
     if not user or not user.is_active:
-        return Response({"detail": "Invalid username or password."}, status=status.HTTP_401_UNAUTHORIZED)
+        return Response({"detail": "Invalid email or password."}, status=status.HTTP_401_UNAUTHORIZED)
     if user.shop_id is None or user.shop.status != "ACTIVE":
         return Response({"detail": "This account cannot sign in. Contact support."}, status=status.HTTP_403_FORBIDDEN)
     refresh = RefreshToken.for_user(user)
@@ -169,6 +194,132 @@ def change_password_view(request):
     request.user.set_password(s.validated_data["new_password"])
     request.user.save()
     return Response({"detail": "Password changed."})
+
+
+# ---------------------------------------------------------------------------
+# Forgot password: emailed 6-digit code (request -> verify -> reset)
+#   - the code is stored only as an HMAC hash and expires after 10 minutes
+#   - 5 wrong guesses burn the code; a new code invalidates every older one
+#   - "send code" always answers 200, so nobody can discover which accounts exist
+# ---------------------------------------------------------------------------
+RESET_CODE_TTL = timedelta(minutes=10)
+RESET_MAX_ATTEMPTS = 5
+RESET_RESEND_SECONDS = 60
+BAD_CODE = {"code": ["Invalid or expired code. Request a new one."]}
+
+
+def _hash_code(user, code):
+    return hmac.new(settings.SECRET_KEY.encode(), f"{user.pk}:{code}".encode(), "sha256").hexdigest()
+
+
+def _find_reset_user(identifier):
+    """Email (must match exactly ONE account) or username. Returns None if not found/inactive."""
+    ident = (identifier or "").strip()
+    if not ident:
+        return None
+    with platform_context():
+        if "@" in ident:
+            found = list(User.objects.filter(email__iexact=ident, is_active=True)[:2])
+            user = found[0] if len(found) == 1 else None  # ambiguous email: use the username instead
+        else:
+            user = User.objects.filter(username__iexact=ident, is_active=True).first()
+        if user and not Shop.objects.filter(pk=user.shop_id, status="ACTIVE").exists():
+            return None
+        return user
+
+
+def _check_code(user, code):
+    """Returns the matching unused, unexpired record, or None. Wrong guesses are counted."""
+    rec = (PasswordResetCode.objects.select_for_update()
+           .filter(user=user, is_used=False, expires_at__gt=timezone.now()).first())
+    if rec is None or rec.attempts >= RESET_MAX_ATTEMPTS:
+        return None
+    if not hmac.compare_digest(rec.code_hash, _hash_code(user, str(code).strip())):
+        rec.attempts += 1
+        rec.save(update_fields=["attempts"])
+        return None
+    return rec
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([ForgotPasswordThrottle])
+def forgot_password(request):
+    """Always answers 200 so nobody can discover which emails/usernames exist."""
+    ok = Response({"detail": "If the account exists, a 6-digit code has been sent to its email."})
+    user = _find_reset_user(request.data.get("identifier"))
+    if user is None or not user.email:
+        return ok
+
+    with platform_context(), transaction.atomic():
+        latest = PasswordResetCode.objects.filter(user=user).first()
+        if latest and (timezone.now() - latest.created_at).total_seconds() < RESET_RESEND_SECONDS:
+            return ok  # resend cooldown
+        PasswordResetCode.objects.filter(user=user, is_used=False).update(is_used=True)
+        code = f"{secrets.randbelow(10**6):06d}"
+        PasswordResetCode.objects.create(
+            user=user, code_hash=_hash_code(user, code), expires_at=timezone.now() + RESET_CODE_TTL)
+
+    try:
+        send_mail(
+            subject="Your Cloud 360 POS password reset code",
+            message=(f"Hello {user.first_name or user.username},\n\n"
+                     f"Your password reset code is: {code}\n\n"
+                     "It expires in 10 minutes. If you did not ask for this, ignore this email."),
+            from_email=getattr(settings, "DEFAULT_FROM_EMAIL", None),
+            recipient_list=[user.email],
+        )
+    except Exception:
+        logger.exception("Could not send password reset email")
+    return ok
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([ResetCodeThrottle])
+@transaction.atomic
+def verify_reset_code(request):
+    """Checks the code without using it (the reset step checks it again)."""
+    user = _find_reset_user(request.data.get("identifier"))
+    code = str(request.data.get("code") or "")
+    if user is None or len(code) != 6:
+        return Response(BAD_CODE, status=status.HTTP_400_BAD_REQUEST)
+    with platform_context():
+        rec = _check_code(user, code)
+    if rec is None:
+        # Return (not raise) so the attempt counter is not rolled back.
+        return Response(BAD_CODE, status=status.HTTP_400_BAD_REQUEST)
+    return Response({"detail": "Code verified."})
+
+
+@api_view(["POST"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([ResetCodeThrottle])
+@transaction.atomic
+def reset_password(request):
+    s = ResetPasswordSerializer(data=request.data)
+    s.is_valid(raise_exception=True)  # weak password -> 400 on new_password, code stays valid
+    d = s.validated_data
+    user = _find_reset_user(d["identifier"])
+    if user is None:
+        return Response(BAD_CODE, status=status.HTTP_400_BAD_REQUEST)
+    with platform_context():
+        rec = _check_code(user, d["code"])
+        if rec is None:
+            return Response(BAD_CODE, status=status.HTTP_400_BAD_REQUEST)
+        user.set_password(d["new_password"])
+        user.save(update_fields=["password"])
+        PasswordResetCode.objects.filter(user=user, is_used=False).update(is_used=True)
+        try:  # sign out every existing session
+            from rest_framework_simplejwt.token_blacklist.models import BlacklistedToken, OutstandingToken
+            for t in OutstandingToken.objects.filter(user=user):
+                BlacklistedToken.objects.get_or_create(token=t)
+        except Exception:
+            pass  # blacklist app not installed
+    return Response({"detail": "Password updated."})
 
 
 class UserViewSet(viewsets.ModelViewSet):
@@ -230,6 +381,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
     """Products. Served at /medicines/ (legacy) and /products/ (generic alias)."""
 
     serializer_class = MedicineSerializer
+    parser_classes = [JSONParser, MultiPartParser, FormParser]  # JSON, or multipart when an image is sent
 
     def get_queryset(self):
         qs = Medicine.objects.all().order_by("name")
@@ -257,6 +409,14 @@ class MedicineViewSet(viewsets.ModelViewSet):
         entitlements.enforce_limit(self.request.user.shop, "products", Medicine.objects.count())
         serializer.save()
 
+    def perform_update(self, serializer):
+        # Delete the old file from disk when the image is replaced or removed.
+        old = serializer.instance.image if "image" in serializer.validated_data else None
+        old_name = old.name if old else None
+        instance = serializer.save()
+        if old_name and (not instance.image or instance.image.name != old_name):
+            old.storage.delete(old_name)
+
     def perform_destroy(self, instance):
         instance.soft_delete()
 
@@ -264,7 +424,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
     def low_stock(self, request):
         qs = _stock_annotated(Medicine.objects.filter(is_visible=True))
         items = [m for m in qs if (m.stock_qty or 0) <= m.reorder_level]
-        return Response(MedicineAutocompleteSerializer(items, many=True).data)
+        return Response(MedicineAutocompleteSerializer(items, many=True, context={"request": request}).data)
 
     @action(detail=False, methods=["get"])
     def autocomplete(self, request):
@@ -284,7 +444,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
         qs = _stock_annotated(qs).order_by("name")
         if q:
             qs = qs[:30]
-        return Response(MedicineAutocompleteSerializer(qs, many=True).data)
+        return Response(MedicineAutocompleteSerializer(qs, many=True, context={"request": request}).data)
 
     @action(detail=False, methods=["post"], url_path="quick-add")
     @transaction.atomic
@@ -295,8 +455,9 @@ class MedicineViewSet(viewsets.ModelViewSet):
         d = s.validated_data
         medicine = Medicine.objects.create(
             name=d["name"], generic_name=d["generic_name"], category=d["category"],
-            unit=d["unit"], unit_price=d["unit_price"], reorder_level=d["reorder_level"],
-            barcode=d["barcode"], sku=d["sku"],
+            unit=d["unit"], unit_price=d["unit_price"], insurance_price=d["insurance_price"],
+            reorder_level=d["reorder_level"],
+            barcode=d["barcode"], sku=d["sku"], image=d.get("image"),
         )
         batch_no = d["batch_number"] or f"B-{timezone.now():%Y%m%d%H%M%S}"
         batch = MedicineBatch.objects.create(
@@ -306,7 +467,8 @@ class MedicineViewSet(viewsets.ModelViewSet):
         )
         _log(medicine, batch, StockTransactionType.STOCK_IN, d["quantity"], "Quick add", request.user)
         medicine = _stock_annotated(Medicine.objects.filter(pk=medicine.pk)).get()
-        return Response(MedicineAutocompleteSerializer(medicine).data, status=status.HTTP_201_CREATED)
+        return Response(MedicineAutocompleteSerializer(medicine, context={"request": request}).data,
+                        status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=["get"], url_path="branch-stock")
     def branch_stock(self, request, pk=None):
@@ -358,7 +520,7 @@ class MedicineViewSet(viewsets.ModelViewSet):
                 to_remove -= take
 
         medicine = _stock_annotated(Medicine.objects.filter(pk=medicine.pk)).get()
-        data = MedicineAutocompleteSerializer(medicine).data
+        data = MedicineAutocompleteSerializer(medicine, context={"request": request}).data
         return Response({**data, "medicine": data})  # the edit modal reads r.medicine
 
 
@@ -776,7 +938,8 @@ def dashboard_summary(request):
         "top_medicines": _top_items(range_qs, 6),
         "recent_sales": OTCSaleSerializer(recent, many=True, context={"request": request}).data,
         "low_stock": MedicineAutocompleteSerializer(
-            sorted(low, key=lambda m: (m.stock_qty or 0))[:8], many=True).data,
+            sorted(low, key=lambda m: (m.stock_qty or 0))[:8], many=True,
+            context={"request": request}).data,
     })
 
 
@@ -1198,13 +1361,15 @@ def register_shop(request):
     with platform_context(), transaction.atomic():
         if User.objects.filter(username__iexact=d["username"]).exists():
             raise ValidationError({"username": "This username is taken."})
+        if User.objects.filter(email__iexact=d["email"]).exists():
+            raise ValidationError({"email": "An account with this email already exists."})
         base = slugify(d["shop_name"])[:40] or "shop"
         slug = f"{base}-{secrets.token_hex(2)}"
         while Shop.objects.filter(slug=slug).exists():
             slug = f"{base}-{secrets.token_hex(3)}"
         shop = Shop.objects.create(name=d["shop_name"], slug=slug, email=d["email"], phone=d["phone"])
-        user = User(username=d["username"], first_name=d["first_name"], email=d["email"],
-                    phone=d["phone"], role=Role.SUPER_ADMIN, shop=shop)
+        user = User(username=d["username"], first_name=d["first_name"], last_name=d["last_name"],
+                    email=d["email"], phone=d["phone"], role=Role.SUPER_ADMIN, shop=shop)
         user.set_password(d["password"])
         user.save()
         with tenant_context(shop):
@@ -1225,6 +1390,73 @@ def business_types(request):
     """Public list of business types, so a sign-up dropdown needs no hardcoding."""
     return Response([{"value": v, "label": label, "tracks_expiry": v in EXPIRY_TRACKED_TYPES}
                      for v, label in BusinessType.choices])
+
+
+# ---------------------------------------------------------------------------
+# Sign-up helpers: username suggestions + availability (public, throttled)
+# ---------------------------------------------------------------------------
+USERNAME_RE = re.compile(r"^[a-z0-9._]{3,30}$")
+
+
+def _username_format_ok(u):
+    return bool(USERNAME_RE.match(u)) and not u.startswith(".") and not u.endswith(".") and ".." not in u
+
+
+def _clean(s):
+    return re.sub(r"[^a-z0-9]", "", (s or "").lower())
+
+
+def _suggest_usernames(first, last, seed="", limit=5):
+    """Free usernames built from the person's name (and optionally what they already typed)."""
+    f, l = _clean(first), _clean(last)
+    bases = []
+    seed = re.sub(r"[^a-z0-9._]", "", (seed or "").lower())[:26]
+    if seed:
+        bases.append(seed)
+    if f and l:
+        bases += [f"{f}.{l}", f"{f}{l}", f"{f}_{l}", f"{f[0]}.{l}", f"{f}.{l[0]}", f"{l}.{f}"]
+    elif f or l:
+        bases.append(f or l)
+    bases = [b[:26] for b in dict.fromkeys(bases) if b]
+
+    candidates = [b for b in bases if _username_format_ok(b)]
+    for b in bases:  # numbered variants, e.g. jane.doe482
+        for _ in range(3):
+            candidates.append(f"{b}{secrets.randbelow(900) + 100}")
+    candidates = [c for c in dict.fromkeys(candidates) if _username_format_ok(c)]
+    if not candidates:
+        return []
+
+    with platform_context():  # usernames are unique across ALL shops
+        taken = set(
+            User.objects.annotate(u=Lower("username")).filter(u__in=candidates).values_list("u", flat=True)
+        )
+    return [c for c in candidates if c not in taken][:limit]
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([LookupThrottle])
+def username_suggestions(request):
+    q = request.query_params
+    return Response({"suggestions": _suggest_usernames(
+        q.get("first_name"), q.get("last_name"), q.get("seed", ""))})
+
+
+@api_view(["GET"])
+@authentication_classes([])
+@permission_classes([AllowAny])
+@throttle_classes([LookupThrottle])
+def check_username(request):
+    u = (request.query_params.get("username") or "").strip().lower()
+    if not _username_format_ok(u):
+        return Response({"valid": False, "available": False,
+                         "detail": "Use 3-30 letters, numbers, dots or underscores."})
+    with platform_context():
+        taken = User.objects.filter(username__iexact=u).exists()
+    return Response({"valid": True, "available": not taken,
+                     "detail": "This username is taken." if taken else ""})
 
 
 # ---------------------------------------------------------------------------
